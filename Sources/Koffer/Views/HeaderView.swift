@@ -1,7 +1,7 @@
 import SwiftUI
 import KofferCore
 
-/// App name, job picker (when there is more than one job) and the one-line status sentence.
+/// App name, the list of backups, and the one-line status sentence for the selected one.
 struct HeaderView: View {
     @EnvironmentObject var model: AppModel
     let job: SyncJob
@@ -17,14 +17,9 @@ struct HeaderView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: Theme.Space.s)
-                if model.engine.jobs.count <= 1 {
-                    JobHints(job: job)
-                    NewBackupButton(style: .icon)
-                }
             }
-            if model.engine.jobs.count > 1 {
-                JobPicker(selected: job)
-            }
+            BackupsList(selected: job)
+            Divider().opacity(0.5)
             Text(model.statusLine(for: job))
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(.primary)

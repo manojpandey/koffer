@@ -64,6 +64,8 @@ final class AppModel: ObservableObject {
     // wrapper is a macro, and the Command Line Tools (without Xcode) ship no plugin for it.
     @Published var panelContentHeight: CGFloat = 420
     @Published var confirmForget: Bool = false
+    /// The backup the "Forget" confirmation is about (set by right-click, the row menu or Settings).
+    @Published var forgetCandidateID: String? = nil
     /// Why "Forget this backup" was refused, shown inline in Settings.
     @Published var forgetRefusal: String? = nil
     @Published var confirmEnable: Bool = false
@@ -117,8 +119,10 @@ final class AppModel: ObservableObject {
 
     private func start() {
         notifier.requestPermission()
-        let testSource: String = engine.job(id: SyncJob.testJobID)?.source ?? SyncJob.testJob().source
-        TestFolder.createIfMissing(at: testSource)
+        // Only while the test backup exists: once it has been forgotten, don't recreate its folder.
+        if let testJob = engine.job(id: SyncJob.testJobID) {
+            TestFolder.createIfMissing(at: testJob.source)
+        }
         for name in VolumeWatcher.currentVolumes().sorted() {
             engine.volumeMounted(name)
         }
@@ -190,6 +194,18 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: Forget
+
+    func askToForget(_ job: SyncJob) {
+        forgetRefusal = nil
+        forgetCandidateID = job.id
+        confirmForget = true
+    }
+
+    func forgetCandidate() {
+        guard let id = forgetCandidateID, let job = engine.job(id: id) else { return }
+        forgetCandidateID = nil
+        forget(job)
+    }
 
     func forget(_ job: SyncJob) {
         let verdict: SafetyVerdict = engine.removeJob(id: job.id)
@@ -307,7 +323,7 @@ final class AppModel: ObservableObject {
     func statusLine(for job: SyncJob) -> String {
         switch phase(for: job) {
         case .setup(let text): return text
-        case .off: return "This job is switched off"
+        case .off: return "Switched off. Nothing is backed up"
         case .waitingForDisk(let volume): return "Plug in \(volume) to back up"
         case .busyElsewhere(let name): return "Busy backing up \(name)"
         case .working(let step): return step

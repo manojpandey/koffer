@@ -33,15 +33,13 @@ struct SettingsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.m) {
             SectionTitle("Settings for \(job.name)")
-            Toggle("Switch this job on", isOn: enabledBinding)
+            Toggle("Back up this folder", isOn: enabledBinding)
             if job.requiredVolume != nil {
                 Toggle("Back up automatically when the disk is plugged in", isOn: autoBinding)
                     .disabled(!job.enabled)
             }
             RemovedItemsRow(job: job)
-            if !job.isTest {
-                ForgetJobRow(job: job)
-            }
+            ForgetJobRow(job: job)
             Rectangle().fill(Theme.hairline).frame(height: 0.5)
             Toggle("Launch at login", isOn: loginBinding)
             if let error = model.loginError {
@@ -146,7 +144,7 @@ struct ForgetJobRow: View {
             HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s) {
                 Text("Stop backing up this folder")
                 Spacer(minLength: Theme.Space.s)
-                Button("Forget this backup\u{2026}") { model.confirmForget = true }
+                Button("Forget this backup\u{2026}") { model.askToForget(job) }
                     .buttonStyle(QuietButtonStyle(compact: true))
                     .disabled(isRunning)
             }
@@ -154,22 +152,9 @@ struct ForgetJobRow: View {
                 TaskFailureText(message: reason)
             }
         }
-        .confirmationDialog("Forget \u{201C}\(job.name)\u{201D}?", isPresented: $model.confirmForget,
-                            titleVisibility: .visible) {
-            Button("Forget backup") { model.forget(job) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(forgetMessage)
-        }
     }
 
     private var isRunning: Bool {
         model.engine.status.isBusy && model.engine.activeJobID == job.id
-    }
-
-    private var forgetMessage: String {
-        "Koffer stops backing up \(DisplayNames.abbreviated(job.source)). "
-            + "Nothing in the cloud or on the disk is deleted: \(job.destination) "
-            + "and \(model.removedFolderName(for: job)) stay as they are."
     }
 }
