@@ -28,7 +28,6 @@ struct FooterView: View {
 struct SettingsSection: View {
     @EnvironmentObject var model: AppModel
     let job: SyncJob
-    @State private var confirmEnable: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.m) {
@@ -55,7 +54,7 @@ struct SettingsSection: View {
         .controlSize(.small)
         .font(.system(size: 12))
         .quietCard()
-        .confirmationDialog("Switch on \u{201C}\(job.name)\u{201D}?", isPresented: $confirmEnable,
+        .confirmationDialog("Switch on \u{201C}\(job.name)\u{201D}?", isPresented: $model.confirmEnable,
                             titleVisibility: .visible) {
             Button("Switch on") { model.engine.setEnabled(true, jobID: job.id) }
             Button("Cancel", role: .cancel) {}
@@ -76,7 +75,7 @@ struct SettingsSection: View {
             get: { model.engine.job(id: job.id)?.enabled ?? job.enabled },
             set: { (on: Bool) in
                 if on && !job.isTest {
-                    confirmEnable = true
+                    model.confirmEnable = true
                 } else {
                     model.engine.setEnabled(on, jobID: job.id)
                 }
@@ -106,7 +105,6 @@ struct SettingsSection: View {
 struct RemovedItemsRow: View {
     @EnvironmentObject var model: AppModel
     let job: SyncJob
-    @State private var confirmEmpty: Bool = false
 
     var body: some View {
         let size: Int64? = model.engine.removedBytes[job.id]
@@ -121,11 +119,11 @@ struct RemovedItemsRow: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: Theme.Space.s)
-            Button("Empty removed items…") { confirmEmpty = true }
+            Button("Empty removed items…") { model.confirmEmpty = true }
                 .buttonStyle(QuietButtonStyle(compact: true))
                 .disabled((size ?? 0) <= 0 || model.engine.status.isBusy)
         }
-        .confirmationDialog("Empty removed items?", isPresented: $confirmEmpty, titleVisibility: .visible) {
+        .confirmationDialog("Empty removed items?", isPresented: $model.confirmEmpty, titleVisibility: .visible) {
             Button("Empty \(sizeText)", role: .destructive) { model.engine.emptyRemovedItems(jobID: job.id) }
             Button("Cancel", role: .cancel) {}
         } message: {

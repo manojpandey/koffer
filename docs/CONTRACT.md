@@ -9,6 +9,8 @@ several people can build in parallel. **Match the names and signatures here exac
 - Swift tools 5.9, Swift 5 language mode, macOS 14. SwiftPM only, no Xcode project.
 - **No macros**: no `@Observable`, no `#Preview`, no Swift Testing. Use `ObservableObject` +
   `@Published`, and XCTest. (The app must build with only the Command Line Tools.)
+- **No `@State`** (nor `@Binding`, `@AppStorage`, `@FocusState`) in views: on newer SDKs these can be macros that the
+  Command Line Tools cannot expand. Keep view state as `@Published` properties on `AppModel`.
 - No third-party dependencies.
 - There is no Swift compiler in the authoring environment; CI on macOS is the compiler.
   Write conservative, explicit Swift: annotate types where inference could be ambiguous,
@@ -55,6 +57,7 @@ public final class SyncEngine: ObservableObject {
     @Published public private(set) var rclonePath: String?           // nil = rclone not installed
     @Published public private(set) var needsReconnect: Bool          // token expired
     @Published public private(set) var mountedVolumes: Set<String>
+    @Published public private(set) var statusJobID: String?         // job `status` is about; nil = all jobs
 
     public init(services: EngineServices)
 

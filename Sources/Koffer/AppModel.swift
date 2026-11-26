@@ -58,6 +58,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var launchAtLogin: Bool
     @Published var loginError: String? = nil
     @Published var showSettings: Bool = false
+    // View-local state lives here instead of in `@State`: with newer SDKs `@State` is a macro, and the
+    // Command Line Tools (without Xcode) ship no plugin for it, so `@State` would not compile there.
+    @Published var panelContentHeight: CGFloat = 420
+    @Published var commandCopied: Bool = false
+    @Published var confirmEnable: Bool = false
+    @Published var confirmEmpty: Bool = false
     @Published var showAllHistory: Bool = false
     /// ChangeKind raw values whose preview group is expanded.
     @Published var expandedKinds: Set<String> = []
@@ -185,6 +191,13 @@ final class AppModel: ObservableObject {
         engine.activeJobID == nil || engine.activeJobID == job.id
     }
 
+    /// True when the engine's last status belongs to this job (or to no job in particular),
+    /// so one job's "Everything is backed up" or problem is never shown on another job.
+    private func statusIsAbout(_ job: SyncJob) -> Bool {
+        guard let id = engine.statusJobID else { return true }
+        return id == job.id
+    }
+
     private var activeJobName: String {
         guard let id = engine.activeJobID, let job = engine.job(id: id) else { return "another folder" }
         return job.name
@@ -207,7 +220,7 @@ final class AppModel: ObservableObject {
         if let volume = job.requiredVolume, !engine.mountedVolumes.contains(volume) {
             return .waitingForDisk(volume)
         }
-        if isMine(job) {
+        if statusIsAbout(job) {
             switch status {
             case .paused(let why): return .paused(why)
             case .needsAttention(let why): return .attention(why)

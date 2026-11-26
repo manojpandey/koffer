@@ -74,9 +74,8 @@ struct AttentionCard<Actions: View>: View {
 /// The only place the word "rclone" appears.
 struct RcloneMissingCard: View {
     @EnvironmentObject var model: AppModel
-    @State private var copied: Bool = false
     private static let command: String = "brew install rclone"
-    private var copyTitle: String { copied ? "Copied" : "Copy" }
+    private var copyTitle: String { model.commandCopied ? "Copied" : "Copy" }
 
     var body: some View {
         AttentionCard(symbol: "wrench.and.screwdriver.fill", tint: Theme.warning, title: "One setup step",
@@ -89,9 +88,9 @@ struct RcloneMissingCard: View {
                     Spacer(minLength: Theme.Space.xs)
                     Button {
                         model.copyToClipboard(RcloneMissingCard.command)
-                        copied = true
+                        model.commandCopied = true
                     } label: {
-                        Label(copyTitle, systemImage: copied ? "checkmark" : "doc.on.doc")
+                        Label(copyTitle, systemImage: model.commandCopied ? "checkmark" : "doc.on.doc")
                     }
                     .buttonStyle(QuietButtonStyle(compact: true))
                 }

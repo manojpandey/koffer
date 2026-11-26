@@ -5,10 +5,9 @@ import KofferCore
 /// then scrolls. The content is measured once (no duplicated view trees, so no duplicated state).
 struct PanelView: View {
     @EnvironmentObject var model: AppModel
-    @State private var contentHeight: CGFloat = 420
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: contentHeight > Theme.maxPanelHeight) {
+        ScrollView(.vertical, showsIndicators: model.panelContentHeight > Theme.maxPanelHeight) {
             PanelContent()
                 .background(
                     GeometryReader { (proxy: GeometryProxy) in
@@ -17,9 +16,11 @@ struct PanelView: View {
                 )
         }
         .frame(width: Theme.panelWidth)
-        .frame(height: min(max(contentHeight, 120), Theme.maxPanelHeight))
+        .frame(height: min(max(model.panelContentHeight, 120), Theme.maxPanelHeight))
         .onPreferenceChange(PanelHeightKey.self) { (height: CGFloat) in
-            if abs(height - contentHeight) > 0.5 { contentHeight = height }
+            if abs(height - model.panelContentHeight) > 0.5 {
+                DispatchQueue.main.async { model.panelContentHeight = height }
+            }
         }
     }
 }

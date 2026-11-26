@@ -43,3 +43,28 @@ jobs:
         with:
           name: Koffer-app
           path: build/Koffer.zip
+
+  # The owner builds with only the Command Line Tools (no Xcode). Prove that path works too.
+  clt-only:
+    name: Command Line Tools only (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the Command Line Tools instead of Xcode
+        run: |
+          sudo xcode-select -s /Library/Developer/CommandLineTools
+          xcode-select -p
+          swift --version
+          ls /Library/Developer/CommandLineTools/SDKs || true
+      - name: Build the app bundle
+        run: ./scripts/build.sh
+      - name: Verify the app bundle
+        run: |
+          test -x build/Koffer.app/Contents/MacOS/Koffer
+          codesign --verify --deep --strict --verbose=2 build/Koffer.app
+

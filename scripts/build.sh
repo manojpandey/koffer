@@ -12,8 +12,15 @@ if ! command -v swift >/dev/null 2>&1; then
 fi
 
 echo "Building Koffer (release)..."
-swift build -c release
-BIN_DIR="$(swift build -c release --show-bin-path)"
+# Newer toolchains (Command Line Tools without Xcode) can fail to start SwiftPM's default
+# build system with "Could not initialize build system". Fall back to the native one.
+BUILD_FLAGS=(-c release)
+if ! swift build "${BUILD_FLAGS[@]}"; then
+  echo "Default build system failed; retrying with --build-system native..."
+  BUILD_FLAGS=(-c release --build-system native)
+  swift build "${BUILD_FLAGS[@]}"
+fi
+BIN_DIR="$(swift build "${BUILD_FLAGS[@]}" --show-bin-path)"
 
 APP="$ROOT/build/Koffer.app"
 rm -rf "$APP"
