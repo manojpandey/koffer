@@ -31,11 +31,29 @@ public struct EngineEnvironment {
     /// Time zone for date stamps (nil = the current one at the moment of use).
     public var timeZone: TimeZone?
     public var now: () -> Date
+    /// Where `installRclone()` puts the rclone it downloads (`<this>/rclone`).
+    public var rcloneInstallDirectory: URL
+    /// Homebrew's `brew`, in order of preference.
+    public var brewCandidates: [String]
+    /// The official rclone zip for this Mac (tests use a file:// URL).
+    public var rcloneDownloadURL: URL
+    /// rclone config file passed as RCLONE_CONFIG (nil = rclone's own default). Tests use a scratch file.
+    public var rcloneConfigPath: String?
+    /// How long `reconnect(remote:)` waits for the sign-in in the browser.
+    public var reconnectTimeout: TimeInterval
+    /// `refreshRemotes(force: false)` skips the check when the last one is younger than this.
+    public var remotesCheckInterval: TimeInterval
 
     public init(configURL: URL, logDirectory: URL, rcloneCandidates: [String] = RcloneLocator.defaultCandidates,
                 mountDelay: TimeInterval = 10, interruptGrace: TimeInterval = 15,
                 homeDirectory: String = NSHomeDirectory(), volumesDirectory: String? = "/Volumes",
-                timeZone: TimeZone? = nil, now: @escaping () -> Date = { Date() }) {
+                timeZone: TimeZone? = nil, now: @escaping () -> Date = { Date() },
+                rcloneInstallDirectory: URL = RcloneLocator.installDirectory,
+                brewCandidates: [String] = EngineEnvironment.defaultBrewCandidates,
+                rcloneDownloadURL: URL = EngineEnvironment.defaultRcloneDownloadURL,
+                rcloneConfigPath: String? = nil,
+                reconnectTimeout: TimeInterval = 300,
+                remotesCheckInterval: TimeInterval = 60) {
         self.configURL = configURL
         self.logDirectory = logDirectory
         self.rcloneCandidates = rcloneCandidates
@@ -45,6 +63,19 @@ public struct EngineEnvironment {
         self.volumesDirectory = volumesDirectory
         self.timeZone = timeZone
         self.now = now
+        self.rcloneInstallDirectory = rcloneInstallDirectory
+        self.brewCandidates = brewCandidates
+        self.rcloneDownloadURL = rcloneDownloadURL
+        self.rcloneConfigPath = rcloneConfigPath
+        self.reconnectTimeout = reconnectTimeout
+        self.remotesCheckInterval = remotesCheckInterval
+    }
+
+    public static let defaultBrewCandidates: [String] = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+
+    /// `https://downloads.rclone.org/rclone-current-osx-<arm64|amd64>.zip` for this Mac's CPU.
+    public static var defaultRcloneDownloadURL: URL {
+        return RemoteParsing.defaultDownloadURL
     }
 
     public static var defaultLogDirectory: URL {
@@ -61,7 +92,11 @@ public struct EngineEnvironment {
 @MainActor
 public final class SyncEngine: ObservableObject {
     public static let settingsUnreadableMessage = "Koffer's settings file can't be read"
-    public static let rcloneMissingMessage = "rclone is not installed. Install it with: brew install rclone"
+    public static let rcloneMissingMessage = "rclone isn't installed yet. Use \"Install rclone\" in Koffer's panel."
+    public static let waitForBackupMessage = "Wait for the current backup to finish"
+    public static let signInWaitingMessage = "Waiting for you to sign in in your browser…"
+    public static let homebrewInstallingMessage = "Installing rclone with Homebrew…"
+    public static let downloadingMessage = "Downloading rclone…"
     public static let stoppedByYouMessage = "Stopped by you"
     public static let unpluggedMessage = "Disk unplugged. Will resume next time"
     public static let offlineMessage = "No internet. Will resume next time"
@@ -79,6 +114,16 @@ public final class SyncEngine: ObservableObject {
     /// The job the current `status` is about (nil = not tied to one job, e.g. unreadable settings).
     /// Lets the UI avoid showing one job's "done" or problem on another job.
     @Published public private(set) var statusJobID: String? = nil
+
+    // v0.2: everything through the panel.
+    /// Remote names with colon, as `rclone listremotes` prints them (e.g. ["onedrive:"]).
+    @Published public private(set) var remotes: [String] = []
+    /// Keyed by remote name with colon.
+    @Published public private(set) var remoteStates: [String: RemoteState] = [:]
+    /// Installing rclone.
+    @Published public private(set) var installState: TaskState = .idle
+    /// Signing in to a remote again.
+    @Published public private(set) var reconnectState: TaskState = .idle
 
     public let environment: EngineEnvironment
     private let services: EngineServices
@@ -115,6 +160,20 @@ public final class SyncEngine: ObservableObject {
 
     /// The task of the sync/preview/purge in flight (tests await it).
     internal private(set) var currentTask: Task<Void, Never>? = nil
+
+    // Connection checks, installing, signing in (v0.2).
+    /// The connection check in flight (tests await it).
+    internal private(set) var remotesTask: Task<Void, Never>? = nil
+    private var lastRemotesCheck: Date? = nil
+    private var remotesRefreshPending: Bool = false
+    /// The rclone installation in flight (tests await it).
+    internal private(set) var installTask: Task<Void, Never>? = nil
+    /// The sign-in in flight (tests await it).
+    internal private(set) var reconnectTask: Task<Void, Never>? = nil
+    private var reconnectRunner: RcloneRunner? = nil
+    private var reconnectGeneration: Int = 0
+    private var reconnectCancelled: Bool = false
+    private var reconnectTimedOut: Bool = false
 
     public convenience init(services: EngineServices) {
         self.init(services: services, environment: EngineEnvironment.standard())
@@ -259,7 +318,7 @@ public final class SyncEngine: ObservableObject {
         guard let rclone = locateRclone() else { return }
         let args = RcloneCommand.size(path: job.removedRoot)
         guard SafetyRules.assertSafe(arguments: args, removedRoot: job.removedRoot).isOK else { return }
-        let runner = RcloneRunner(executablePath: rclone, arguments: args)
+        let runner = makeRunner(rclone, args)
         helperRunner = runner
         helperTask = Task { [weak self] in
             let result = await runner.capture(timeout: 300)
@@ -297,7 +356,7 @@ public final class SyncEngine: ObservableObject {
         currentTask = Task { [weak self] in
             guard let self = self else { return }
             await self.stopHelper()
-            let runner = RcloneRunner(executablePath: rclone, arguments: args)
+            let runner = self.makeRunner(rclone, args)
             self.currentRunner = runner
             let result = await runner.capture(timeout: nil)
             self.currentRunner = nil
@@ -387,7 +446,7 @@ public final class SyncEngine: ObservableObject {
         status = .preparing("Checking free space")
         if uploadBytes > 0, let target = Preflight.aboutTarget(forDestination: job.destination) {
             let aboutArgs: [String] = RcloneCommand.about(remote: target)
-            let runner = RcloneRunner(executablePath: rclone, arguments: aboutArgs)
+            let runner = makeRunner(rclone, aboutArgs)
             currentRunner = runner
             let about = await runner.capture(timeout: 120)
             currentRunner = nil
@@ -605,8 +664,8 @@ public final class SyncEngine: ObservableObject {
 
     private func runRclone(_ path: String, _ args: [String], parser: RcloneLogParser,
                            logHandles: [FileHandle], live: Bool) async -> Int32 {
-        let runner = RcloneRunner(executablePath: path, arguments: args, logHandles: logHandles,
-                                  onLine: { [weak self] (line: String) in
+        let runner = makeRunner(path, args, logHandles: logHandles,
+                                onLine: { [weak self] (line: String) in
             parser.consume(line: line)
             if live { self?.publishProgress(from: parser, force: false) }
         })
@@ -673,6 +732,16 @@ public final class SyncEngine: ObservableObject {
         if let task = helperTask { await task.value }
         helperRunner = nil
         helperTask = nil
+    }
+
+    /// Every rclone child process is made here, so a test's RCLONE_CONFIG reaches all of them.
+    private func makeRunner(_ executable: String, _ arguments: [String], logHandles: [FileHandle] = [],
+                            onLine: (@MainActor (String) -> Void)? = nil) -> RcloneRunner {
+        let runner = RcloneRunner(executablePath: executable, arguments: arguments, logHandles: logHandles, onLine: onLine)
+        if let configPath = environment.rcloneConfigPath {
+            runner.environmentOverrides["RCLONE_CONFIG"] = configPath
+        }
+        return runner
     }
 
     private func locateRclone() -> String? {
@@ -841,5 +910,580 @@ final class RunLog {
         handle = nil
         try? h.synchronize()
         try? h.close()
+    }
+}
+
+// MARK: - v0.2: everything through the panel
+
+// In this file (not a separate one) so it can use the engine's private state (`working`, `config`, ...).
+extension SyncEngine {
+
+    // MARK: Connection check
+
+    /// `rclone listremotes`, then `rclone about <remote> --json` for each remote, one after the other.
+    /// Skipped when the last check is younger than `environment.remotesCheckInterval` (unless `force`),
+    /// and never started while a backup, preview or purge is in flight (the states stay as they are).
+    /// Never touches `status`, `activeJobID` or `statusJobID`.
+    public func refreshRemotes(force: Bool) {
+        guard !working, !status.isBusy else { return }
+        if remotesTask != nil {
+            if force { remotesRefreshPending = true }
+            return
+        }
+        if !force, let last = lastRemotesCheck,
+           environment.now().timeIntervalSince(last) < environment.remotesCheckInterval {
+            return
+        }
+        guard let rclone = locateRclone() else { return }
+        lastRemotesCheck = environment.now()
+        remotesRefreshPending = false
+        remotesTask = Task { [weak self] in
+            guard let self = self else { return }
+            await self.performRemotesRefresh(rclone: rclone)
+            self.remotesTask = nil
+            if self.remotesRefreshPending {
+                self.remotesRefreshPending = false
+                self.refreshRemotes(force: true)
+            }
+        }
+    }
+
+    private func performRemotesRefresh(rclone: String) async {
+        let listArgs: [String] = RcloneCommand.listRemotes()
+        guard SafetyRules.assertSafe(arguments: listArgs, removedRoot: "").isOK else { return }
+        let list = await makeRunner(rclone, listArgs).capture(timeout: 60)
+        if list.status != 0 {
+            let line: String = RemoteParsing.lastErrorLine(list.stderr) ?? "rclone stopped with code \(list.status)"
+            let message: String = "Koffer couldn't read rclone's list of connections: " + line
+            var failed: [String: RemoteState] = [:]
+            for r in remotes { failed[r] = .failed(message) }
+            remoteStates = failed
+            return
+        }
+        let names: [String] = RemoteParsing.parseListRemotes(list.stdout)
+        if names != remotes { remotes = names }
+        let previous: [String: RemoteState] = remoteStates
+        var states: [String: RemoteState] = [:]
+        for r in names { states[r] = .checking }
+        remoteStates = states
+
+        var authFailed: Set<String> = []
+        var connected: Set<String> = []
+        for r in names {
+            if working {
+                // A backup started meanwhile: leave the rest as they were.
+                states[r] = previous[r] ?? .unknown
+                remoteStates[r] = states[r]
+                continue
+            }
+            let args: [String] = RcloneCommand.about(remote: r)
+            if case .refused(let reason) = SafetyRules.assertSafe(arguments: args, removedRoot: "") {
+                remoteStates[r] = .failed(reason)
+                continue
+            }
+            let result = await makeRunner(rclone, args).capture(timeout: 60)
+            let mapped = RemoteParsing.remoteState(remote: r, status: result.status, stdout: result.stdout, stderr: result.stderr)
+            remoteStates[r] = mapped.state
+            if mapped.isAuthProblem {
+                authFailed.insert(SafetyRules.remoteKey(r))
+            } else if case .connected = mapped.state {
+                connected.insert(SafetyRules.remoteKey(r))
+            }
+        }
+
+        // `needsReconnect` is about the remotes the backups use; a stale remote nobody uses must not block them.
+        var jobRemotes: Set<String> = []
+        for j in jobs {
+            let key: String = SafetyRules.remoteKey(j.remoteName)
+            if !key.isEmpty { jobRemotes.insert(key) }
+        }
+        if !authFailed.intersection(jobRemotes).isEmpty {
+            needsReconnect = true
+        } else if needsReconnect && !jobRemotes.isEmpty && jobRemotes.isSubset(of: connected) {
+            needsReconnect = false
+        }
+    }
+
+    /// A folder command hit an expired sign-in.
+    private func noteAuthProblem(remote: String) {
+        let key: String = SafetyRules.remoteKey(remote)
+        if key.isEmpty { return }
+        let name: String = remote.hasSuffix(":") ? remote : remote + ":"
+        remoteStates[name] = .failed(RemoteParsing.reconnectMessage(name))
+        if jobs.contains(where: { SafetyRules.remoteKey($0.remoteName) == key }) {
+            needsReconnect = true
+        }
+    }
+
+    // MARK: Cloud folders
+
+    /// Names of the folders directly inside `remote` + `path`, sorted case-insensitively.
+    /// `remote` is "onedrive:" (path relative to its top, "" = the top) or "" for this computer (path is a full path).
+    public func listFolders(remote: String, path: String) async -> Result<[String], EngineError> {
+        if working || status.isBusy { return .failure(EngineError(SyncEngine.waitForBackupMessage)) }
+        guard let target = RemoteParsing.target(remote: remote, path: path) else {
+            return .failure(EngineError("That folder can't be opened. Folder names \".\" and \"..\" aren't allowed."))
+        }
+        guard let rclone = locateRclone() else { return .failure(EngineError(SyncEngine.rcloneMissingMessage)) }
+        let args: [String] = RcloneCommand.listFolders(target: target)
+        if case .refused(let reason) = SafetyRules.assertSafe(arguments: args, removedRoot: "") {
+            return .failure(EngineError(reason))
+        }
+        let result = await makeRunner(rclone, args).capture(timeout: 120)
+        if result.status == 0 {
+            if let names = RemoteParsing.parseFolderNames(result.stdout) { return .success(names) }
+            return .failure(EngineError("Koffer couldn't read the list of folders."))
+        }
+        let mapped = RemoteParsing.folderError(remote: remote, status: result.status, stderr: result.stderr,
+                                               action: "open that folder")
+        if mapped.isAuthProblem { noteAuthProblem(remote: remote) }
+        return .failure(mapped.error)
+    }
+
+    /// `rclone mkdir <remote><path>`. Success is `.success(true)`; an existing folder is fine too.
+    public func createFolder(remote: String, path: String) async -> Result<Bool, EngineError> {
+        if working || status.isBusy { return .failure(EngineError(SyncEngine.waitForBackupMessage)) }
+        if RemoteParsing.hasEmptyPart(path) { return .failure(EngineError("Give the new folder a name.")) }
+        guard let target = RemoteParsing.target(remote: remote, path: path) else {
+            return .failure(EngineError("That folder name can't be used. \".\" and \"..\" aren't allowed."))
+        }
+        guard let rclone = locateRclone() else { return .failure(EngineError(SyncEngine.rcloneMissingMessage)) }
+        let args: [String] = RcloneCommand.mkdir(target: target)
+        if case .refused(let reason) = SafetyRules.assertSafe(arguments: args, removedRoot: "") {
+            return .failure(EngineError(reason))
+        }
+        let result = await makeRunner(rclone, args).capture(timeout: 120)
+        if result.status == 0 { return .success(true) }
+        let mapped = RemoteParsing.folderError(remote: remote, status: result.status, stderr: result.stderr,
+                                               action: "create the folder")
+        if mapped.isAuthProblem { noteAuthProblem(remote: remote) }
+        return .failure(mapped.error)
+    }
+
+    // MARK: New backups
+
+    /// A ready-to-add job: destination = remote + remotePath; removed items go to the sibling folder
+    /// "_<last part>_removed"; tied to the disk when the folder is under /Volumes/<name>/; a unique id from the name.
+    /// `remote` "" means this computer (then `remotePath` is a full path).
+    public func proposedJob(name: String, source: String, remote: String, remotePath: String) -> SyncJob {
+        let cleanSource: String = SafetyRules.normalizeLocal(source.trimmingCharacters(in: .whitespaces))
+        let trimmedName: String = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        var jobName: String = trimmedName
+        if jobName.isEmpty {
+            jobName = (cleanSource as NSString).lastPathComponent
+            if jobName.isEmpty || jobName == "/" { jobName = "Backup" }
+        }
+
+        var remoteName: String = remote.trimmingCharacters(in: .whitespaces)
+        if !remoteName.isEmpty && !remoteName.hasSuffix(":") { remoteName += ":" }
+        let destination: String
+        let removedRoot: String
+        if remoteName.isEmpty {
+            let dest: String = SafetyRules.normalizeLocal(remotePath.trimmingCharacters(in: .whitespaces))
+            destination = dest
+            var last: String = (dest as NSString).lastPathComponent
+            if last.isEmpty || last == "/" { last = RemoteParsing.slug(jobName) }
+            var parent: String = (dest as NSString).deletingLastPathComponent
+            if parent.isEmpty { parent = "/" }
+            removedRoot = RcloneCommand.join(parent, "_" + last + "_removed")
+        } else {
+            var parts: [String] = remotePath.split(separator: "/", omittingEmptySubsequences: true).map { String($0) }
+            destination = remoteName + parts.joined(separator: "/")
+            let last: String = parts.last ?? RemoteParsing.slug(jobName)
+            if !parts.isEmpty { parts.removeLast() }
+            parts.append("_" + last + "_removed")
+            removedRoot = remoteName + parts.joined(separator: "/")
+        }
+
+        var volume: String? = nil
+        let components: [String] = cleanSource.split(separator: "/").map { String($0) }
+        if components.count >= 2 && components[0] == "Volumes" && !components[1].isEmpty {
+            volume = components[1]
+        }
+
+        var taken: Set<String> = [SyncJob.testJobID]
+        for j in jobs { taken.insert(j.id) }
+        for j in config.jobs { taken.insert(j.id) }
+        let base: String = RemoteParsing.slug(jobName)
+        var id: String = base
+        var n: Int = 2
+        while taken.contains(id) {
+            id = base + "-" + String(n)
+            n += 1
+        }
+
+        return SyncJob(id: id, name: jobName, source: cleanSource, destination: destination, removedRoot: removedRoot,
+                       requiredVolume: volume, autoSyncOnMount: volume != nil, enabled: true, previewApproved: false,
+                       extraLogDirectory: nil, isTest: false)
+    }
+
+    /// Checks the job (safety rules against the settings on disk, no duplicates, no shared cloud folders),
+    /// then saves it. A refusal changes nothing.
+    public func addJob(_ job: SyncJob) -> SafetyVerdict {
+        reloadConfig()
+        if configBroken { return .refused(SyncEngine.settingsUnreadableMessage) }
+        if job.id.trimmingCharacters(in: .whitespaces).isEmpty || job.name.trimmingCharacters(in: .whitespaces).isEmpty {
+            return .refused("The backup needs a name.")
+        }
+        if case .refused(let reason) = SafetyRules.check(job: job, config: config, homeDirectory: environment.homeDirectory) {
+            return .refused(reason)
+        }
+        if let problem = SyncEngine.conflictWithExistingJobs(job, existing: config.jobs) {
+            return .refused(problem)
+        }
+        var fresh: KofferConfig = config
+        fresh.jobs.append(job)
+        do {
+            try configStore.save(fresh)
+        } catch {
+            return .refused("Koffer couldn't save its settings, so the backup wasn't added.")
+        }
+        config = fresh
+        jobs = fresh.jobs
+        return .ok
+    }
+
+    /// Forgets a job in the settings only. Nothing in the cloud is touched. Refused while that job runs.
+    public func removeJob(id: String) -> SafetyVerdict {
+        if working, let running = runningJob, running.id == id {
+            return .refused("Stop this backup first, then forget it.")
+        }
+        if configBroken { return .refused(SyncEngine.settingsUnreadableMessage) }
+        var fresh: KofferConfig = config
+        if FileManager.default.fileExists(atPath: configStore.fileURL.path) {
+            do {
+                fresh = try configStore.load()
+            } catch {
+                configBroken = true
+                if !working {
+                    status = .needsAttention(SyncEngine.settingsUnreadableMessage)
+                    statusJobID = nil
+                }
+                return .refused(SyncEngine.settingsUnreadableMessage)
+            }
+        }
+        guard let index = fresh.jobs.firstIndex(where: { $0.id == id }) else {
+            config = fresh
+            if jobs != fresh.jobs { jobs = fresh.jobs }
+            return .refused("Koffer doesn't know that backup.")
+        }
+        fresh.jobs.remove(at: index)
+        do {
+            try configStore.save(fresh)
+        } catch {
+            return .refused("Koffer couldn't save its settings, so the backup wasn't forgotten.")
+        }
+        config = fresh
+        jobs = fresh.jobs
+        removedBytes[id] = nil
+        if preview?.jobID == id { preview = nil }
+        if pausedOfflineJobID == id { pausedOfflineJobID = nil }
+        if !working && statusJobID == id {
+            status = .idle
+            statusJobID = nil
+        }
+        return .ok
+    }
+
+    /// Why `job` can't sit next to the existing jobs, or nil. Duplicates first, then shared cloud folders:
+    /// one job's sync would move another job's files into its removed items.
+    static func conflictWithExistingJobs(_ job: SyncJob, existing: [SyncJob]) -> String? {
+        guard let newDestination = RcloneLocation.parse(job.destination),
+              let newRemoved = RcloneLocation.parse(job.removedRoot) else {
+            return "The destination is not a valid rclone path (remote:folder)."
+        }
+        let newSource: String = SafetyRules.normalizeLocal(job.source.trimmingCharacters(in: .whitespaces)).lowercased()
+        for other in existing {
+            guard let otherDestination = RcloneLocation.parse(other.destination) else { continue }
+            let otherSource: String = SafetyRules.normalizeLocal(other.source.trimmingCharacters(in: .whitespaces)).lowercased()
+            let sameDestination: Bool = otherDestination.isSameOrInside(newDestination) && newDestination.isSameOrInside(otherDestination)
+            if otherSource == newSource && sameDestination {
+                return "\"\(other.name)\" already backs up this folder to the same place."
+            }
+        }
+        for other in existing where other.id == job.id {
+            return "There is already a backup with this id (\"\(other.name)\"). Pick another name."
+        }
+        for other in existing {
+            var theirs: [RcloneLocation] = []
+            if let d = RcloneLocation.parse(other.destination) { theirs.append(d) }
+            if let r = RcloneLocation.parse(other.removedRoot) { theirs.append(r) }
+            for mine in [newDestination, newRemoved] {
+                for t in theirs where mine.isSameOrInside(t) || t.isSameOrInside(mine) {
+                    return "This would share a cloud folder with \"\(other.name)\". Pick a separate folder."
+                }
+            }
+        }
+        return nil
+    }
+
+    // MARK: Installing rclone
+
+    /// `/opt/homebrew/bin/brew` or `/usr/local/bin/brew` (see `environment.brewCandidates`) when executable.
+    public var homebrewPath: String? {
+        for path in environment.brewCandidates where FileManager.default.isExecutableFile(atPath: path) {
+            return path
+        }
+        return nil
+    }
+
+    /// With Homebrew: `brew install rclone`. Otherwise (or if Homebrew fails): download the official zip,
+    /// unpack it with ditto, check the binary runs, and only then move it to
+    /// `environment.rcloneInstallDirectory/rclone` (mode 755). Ends with `recheckRclone()` and `refreshRemotes(force: true)`.
+    public func installRclone() {
+        if case .running = installState { return }
+        installState = .running(homebrewPath != nil ? SyncEngine.homebrewInstallingMessage : SyncEngine.downloadingMessage)
+        installTask = Task { [weak self] in
+            guard let self = self else { return }
+            await self.performInstall()
+            self.installTask = nil
+        }
+    }
+
+    private func performInstall() async {
+        var brewProblem: String? = nil
+        if let brew = homebrewPath {
+            installState = .running(SyncEngine.homebrewInstallingMessage)
+            let runner = RcloneRunner(executablePath: brew, arguments: ["install", "rclone"])
+            runner.environmentOverrides = ["HOMEBREW_NO_AUTO_UPDATE": "1", "HOMEBREW_NO_ENV_HINTS": "1"]
+            let result = await runner.capture(timeout: 1800)
+            if result.status == 0 {
+                recheckRclone()
+                if rclonePath != nil {
+                    finishInstall()
+                    return
+                }
+                brewProblem = "Homebrew finished, but Koffer can't find its rclone."
+            } else {
+                let line: String? = RemoteParsing.lastErrorLine(result.stderr) ?? RemoteParsing.lastErrorLine(result.stdout)
+                brewProblem = "Homebrew couldn't install rclone" + (line.map { ": " + $0 } ?? ".")
+            }
+        }
+        installState = .running(SyncEngine.downloadingMessage)
+        if let problem = await downloadAndInstallRclone() {
+            if let b = brewProblem {
+                installState = .failed(b + " Downloading it didn't work either: " + problem)
+            } else {
+                installState = .failed(problem)
+            }
+            return
+        }
+        recheckRclone()
+        if rclonePath == nil {
+            installState = .failed("rclone was installed, but Koffer can't find it.")
+            return
+        }
+        finishInstall()
+    }
+
+    private func finishInstall() {
+        installState = .succeeded
+        refreshRemotes(force: true)
+    }
+
+    /// Returns nil on success, otherwise plain words. Never leaves a half-written binary in place:
+    /// everything happens in a scratch folder next to the target, and the checked binary is renamed in one step.
+    private func downloadAndInstallRclone() async -> String? {
+        let fm = FileManager.default
+        let binDirectory: URL = environment.rcloneInstallDirectory
+        let work: URL = binDirectory.appendingPathComponent(".download-" + UUID().uuidString, isDirectory: true)
+        do {
+            try fm.createDirectory(at: work, withIntermediateDirectories: true, attributes: nil)
+        } catch {
+            return "Koffer couldn't create its folder for rclone."
+        }
+        defer { try? fm.removeItem(at: work) }
+
+        let data: Data
+        do {
+            data = try await SyncEngine.downloadData(from: environment.rcloneDownloadURL)
+        } catch let e as EngineError {
+            return e.message
+        } catch {
+            return "Downloading rclone didn't work: \(error.localizedDescription)"
+        }
+        let zip: URL = work.appendingPathComponent("rclone.zip")
+        do {
+            try data.write(to: zip, options: [.atomic])
+        } catch {
+            return "Koffer couldn't save the download."
+        }
+
+        let unpacked: URL = work.appendingPathComponent("unpacked", isDirectory: true)
+        let ditto = await RcloneRunner.capture(executablePath: "/usr/bin/ditto",
+                                               arguments: ["-x", "-k", zip.path, unpacked.path], timeout: 300)
+        if ditto.status != 0 {
+            let line: String? = RemoteParsing.lastErrorLine(ditto.stderr)
+            return "The download couldn't be unpacked" + (line.map { ": " + $0 } ?? ".")
+        }
+        guard let found = RemoteParsing.findBinary(in: unpacked, fileManager: fm) else {
+            return "The download didn't contain rclone."
+        }
+
+        let staged: URL = work.appendingPathComponent("rclone-checked")
+        do {
+            try fm.moveItem(at: found, to: staged)
+            try fm.setAttributes([FileAttributeKey.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: staged.path)
+        } catch {
+            return "Koffer couldn't prepare rclone."
+        }
+        // Make sure it really runs on this Mac before it replaces anything.
+        let versionArgs: [String] = RcloneCommand.version()
+        guard SafetyRules.assertSafe(arguments: versionArgs, removedRoot: "").isOK else { return "Koffer couldn't check rclone." }
+        let check = await RcloneRunner.capture(executablePath: staged.path, arguments: versionArgs, timeout: 60)
+        if check.status != 0 {
+            return "The downloaded rclone doesn't run on this Mac."
+        }
+        let destination: URL = binDirectory.appendingPathComponent("rclone")
+        if rename(staged.path, destination.path) != 0 {
+            return "Koffer couldn't put rclone in place."
+        }
+        return nil
+    }
+
+    /// file:// URLs are read directly (tests); anything else goes through URLSession.
+    nonisolated static func downloadData(from url: URL) async throws -> Data {
+        if url.isFileURL {
+            do {
+                return try Data(contentsOf: url)
+            } catch {
+                throw EngineError("Downloading rclone didn't work: the file isn't there.")
+            }
+        }
+        let (data, response) = try await URLSession.shared.data(from: url)
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw EngineError("Downloading rclone didn't work (the server answered \(http.statusCode)).")
+        }
+        return data
+    }
+
+    // MARK: Signing in again
+
+    /// Signs in to `remote` ("onedrive:") again without Terminal. See `performReconnect` for how.
+    public func reconnect(remote: String) {
+        if case .running = reconnectState { return }
+        let trimmed: String = remote.trimmingCharacters(in: .whitespaces)
+        let name: String = trimmed.hasSuffix(":") ? trimmed : trimmed + ":"
+        guard SafetyRules.isPlainRemoteName(name) else {
+            reconnectState = .failed("That is not a connection Koffer can sign in to.")
+            return
+        }
+        if working || status.isBusy {
+            reconnectState = .failed(SyncEngine.waitForBackupMessage)
+            return
+        }
+        guard let rclone = locateRclone() else {
+            reconnectState = .failed(SyncEngine.rcloneMissingMessage)
+            return
+        }
+        reconnectGeneration += 1
+        let generation: Int = reconnectGeneration
+        reconnectCancelled = false
+        reconnectTimedOut = false
+        reconnectState = .running(SyncEngine.signInWaitingMessage)
+        // A cancelled sign-in may still be letting go of rclone's local port: wait for it first.
+        let previous: Task<Void, Never>? = reconnectTask
+        reconnectTask = Task { [weak self] in
+            if let p = previous { await p.value }
+            guard let self = self else { return }
+            await self.performReconnect(rclone: rclone, remote: name, generation: generation)
+            if generation == self.reconnectGeneration { self.reconnectTask = nil }
+        }
+    }
+
+    /// Stops a sign-in that is waiting for the browser. reconnectState goes back to .idle.
+    public func cancelReconnect() {
+        guard case .running = reconnectState else { return }
+        reconnectCancelled = true
+        reconnectState = .idle
+        reconnectRunner?.interrupt(grace: 3)
+    }
+
+    /// How signing in again works (checked against rclone v1.71.2; see the notes at the end of this comment).
+    ///
+    /// 1. `rclone listremotes --long` gives the remote's type. For a `onedrive` remote whose settings have a
+    ///    `drive_id` (`rclone config redacted <name>`, which prints secrets as XXX), Koffer runs
+    ///    `rclone config update <name> config_refresh_token=true config_is_local=true config_type=driveid
+    ///    config_drive_ok=true --no-output --auto-confirm`, which signs in again and keeps the same drive.
+    ///    Every other remote: `rclone config reconnect <name>: --auto-confirm`.
+    /// 2. With `--auto-confirm` rclone asks nothing: it takes each question's default ("Already have a token -
+    ///    refresh?" yes, "Use web browser to automatically authenticate?" yes), starts its own web server on
+    ///    127.0.0.1:53682, opens the default browser itself (`open` on macOS) and prints "Waiting for code...".
+    ///    stdin is /dev/null, so even an unexpected question gets end-of-input, which rclone reads as "default".
+    /// 3. Koffer waits for the process: exit 0 = signed in (rclone has saved the new token). Non-zero = failed,
+    ///    with rclone's last error line. After `environment.reconnectTimeout` (5 min) or `cancelReconnect()`,
+    ///    Koffer sends SIGINT (rclone exits 130 and saves nothing), then SIGTERM after 3 s.
+    ///
+    /// Verified with the real binary against a scratch config (`--config /tmp/...`) holding a made-up onedrive
+    /// remote with a fake token, no browser available:
+    /// - `config reconnect` has no `--non-interactive`/`--continue`/`--state`/`--result` ("unknown flag",
+    ///   exit 2); that JSON question protocol exists only on `config create`/`config update`, where each answer
+    ///   is a separate rclone run and the browser step blocks inside one of them anyway. Not worth the moving parts.
+    /// - Without flags and with stdin closed, rclone prints the y/n questions, takes the defaults and reaches
+    ///   "Waiting for code..."; with `--auto-confirm` it prints no questions at all and reaches the same point.
+    /// - The `config update` form above logs "Override value found" for each config_* answer and reaches
+    ///   "Waiting for code..."; the config file is unchanged afterwards (config_* keys are never saved).
+    /// - SIGINT while waiting: exit 130, config file unchanged.
+    /// - A second sign-in while one waits: exit 2, "failed to start auth webserver: listen tcp 127.0.0.1:53682:
+    ///   bind: address already in use". Unknown remote: exit 2, "didn't find section in config file".
+    ///   Non-OAuth remote (local): exit 2, "backend doesn't support reconnect or authorize".
+    /// Not verified here (needs a real account and a browser): the OAuth round trip itself, i.e. that after the
+    /// browser sign-in rclone exits 0, and that OneDrive's follow-up questions (drive type, drive id, "Drive OK?")
+    /// are answered as the rclone v1.71.2 source says (`config_type=driveid` -> drive id defaults to the current
+    /// `drive_id` -> auto-confirmed; `driveid_final` re-reads the drive type).
+    private func performReconnect(rclone: String, remote: String, generation: Int) async {
+        var args: [String] = RcloneCommand.reconnect(remote: remote)
+        let longArgs: [String] = RcloneCommand.listRemotes(long: true)
+        if SafetyRules.assertSafe(arguments: longArgs, removedRoot: "").isOK {
+            let list = await makeRunner(rclone, longArgs).capture(timeout: 30)
+            let types: [String: String] = list.status == 0 ? RemoteParsing.parseListRemotesLong(list.stdout) : [:]
+            if (types[remote] ?? "").lowercased() == "onedrive" {
+                let redactedArgs: [String] = RcloneCommand.configRedacted(remote: remote)
+                if SafetyRules.assertSafe(arguments: redactedArgs, removedRoot: "").isOK {
+                    let redacted = await makeRunner(rclone, redactedArgs).capture(timeout: 30)
+                    if redacted.status == 0 && RemoteParsing.redactedConfigHasDriveID(redacted.stdout) {
+                        args = RcloneCommand.reconnectKeepingOneDriveDrive(remote: remote)
+                    }
+                }
+            }
+        }
+        guard generation == reconnectGeneration, !reconnectCancelled else { return }
+        if case .refused(let reason) = SafetyRules.assertSafe(arguments: args, removedRoot: "") {
+            reconnectState = .failed(reason)
+            return
+        }
+
+        let runner: RcloneRunner = makeRunner(rclone, args)
+        reconnectRunner = runner
+        let timeout: TimeInterval = max(0, environment.reconnectTimeout)
+        let timer: Task<Void, Never> = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            if Task.isCancelled { return }
+            guard let self = self else { return }
+            if generation == self.reconnectGeneration { self.reconnectTimedOut = true }
+            runner.interrupt(grace: 3)
+        }
+        let result = await runner.capture(timeout: nil)
+        timer.cancel()
+        if reconnectRunner === runner { reconnectRunner = nil }
+        guard generation == reconnectGeneration else { return }
+        if reconnectCancelled {
+            reconnectState = .idle
+            return
+        }
+        if reconnectTimedOut {
+            let minutes: Int = max(1, Int((timeout / 60).rounded()))
+            let unit: String = minutes == 1 ? "minute" : "minutes"
+            reconnectState = .failed("Koffer waited \(minutes) \(unit) for the sign-in in your browser and stopped. Try again.")
+            return
+        }
+        if result.status == 0 {
+            reconnectState = .succeeded
+            needsReconnect = false
+            if case .failed = remoteStates[remote] ?? .unknown { remoteStates[remote] = .unknown }
+            refreshRemotes(force: true)
+        } else {
+            reconnectState = .failed(RemoteParsing.reconnectFailure(remote: remote, status: result.status, stderr: result.stderr))
+        }
     }
 }

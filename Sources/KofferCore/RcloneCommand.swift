@@ -58,4 +58,57 @@ public enum RcloneCommand {
     public static func purge(path: String) -> [String] {
         return ["purge", path]
     }
+
+    /// `rclone listremotes` (one "name:" per line), or with `--long` ("name: type" per line).
+    public static func listRemotes(long: Bool = false) -> [String] {
+        return long ? ["listremotes", "--long"] : ["listremotes"]
+    }
+
+    /// `rclone lsjson <target> --dirs-only` (the folders directly inside target).
+    public static func listFolders(target: String) -> [String] {
+        return ["lsjson", target, "--dirs-only", "--no-mimetype", "--no-modtime"]
+    }
+
+    /// `rclone mkdir <target>`
+    public static func mkdir(target: String) -> [String] {
+        return ["mkdir", target]
+    }
+
+    /// `rclone version`
+    public static func version() -> [String] {
+        return ["version"]
+    }
+
+    /// `rclone config redacted <name>`: the remote's settings with every secret replaced by XXX.
+    /// `remote` may be given with or without the colon.
+    public static func configRedacted(remote: String) -> [String] {
+        return ["config", "redacted", RcloneCommand.configName(remote)]
+    }
+
+    /// `rclone config reconnect <remote:> --auto-confirm`: signs in again, taking the default answer
+    /// to every question (refresh the token: yes; use a web browser: yes).
+    public static func reconnect(remote: String) -> [String] {
+        return ["config", "reconnect", RcloneCommand.configName(remote) + ":", "--auto-confirm"]
+    }
+
+    /// Sign-in for a OneDrive remote that keeps the drive it already uses.
+    ///
+    /// `config reconnect --auto-confirm` would answer "which drive?" with the first drive Microsoft lists,
+    /// which is not always the one the remote was set up with. `config update` with only `config_*` answers
+    /// (rclone never saves those keys; they only answer its questions) refreshes the token the same way
+    /// ("If the remote uses OAuth the token will be updated", `rclone config update --help`), and
+    /// `config_type=driveid` makes rclone ask for the drive ID with the current `drive_id` as the default,
+    /// which auto-confirm then takes.
+    public static func reconnectKeepingOneDriveDrive(remote: String) -> [String] {
+        return ["config", "update", RcloneCommand.configName(remote),
+                "config_refresh_token=true", "config_is_local=true", "config_type=driveid",
+                "config_drive_ok=true", "--no-output", "--auto-confirm"]
+    }
+
+    /// "onedrive:" -> "onedrive"
+    public static func configName(_ remote: String) -> String {
+        var r: String = remote.trimmingCharacters(in: .whitespaces)
+        while r.hasSuffix(":") { r.removeLast() }
+        return r
+    }
 }

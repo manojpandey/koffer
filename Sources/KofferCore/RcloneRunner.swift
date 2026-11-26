@@ -46,6 +46,9 @@ public final class RcloneRunner: @unchecked Sendable {
     public let executablePath: String
     public let arguments: [String]
 
+    /// Extra environment variables for the child (e.g. RCLONE_CONFIG). Set before `run`/`capture`.
+    public var environmentOverrides: [String: String] = [:]
+
     private let logHandles: [FileHandle]
     private let onLine: (@MainActor (String) -> Void)?
     private let lock: NSLock = NSLock()
@@ -144,6 +147,11 @@ public final class RcloneRunner: @unchecked Sendable {
         proc.standardOutput = outPipe
         proc.standardError = errPipe
         proc.standardInput = FileHandle.nullDevice
+        if !environmentOverrides.isEmpty {
+            var env: [String: String] = ProcessInfo.processInfo.environment
+            for (key, value) in environmentOverrides { env[key] = value }
+            proc.environment = env
+        }
 
         let outDrain = PipeDrain()
         let errDrain = PipeDrain()

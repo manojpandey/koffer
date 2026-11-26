@@ -57,6 +57,8 @@ final class RcloneCommandTests: XCTestCase {
         FileManager.default.createFile(atPath: exec, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
         XCTAssertEqual(RcloneLocator(candidates: ["/nope/rclone", dir.path, notExec, exec]).locate(), exec)
         XCTAssertNil(RcloneLocator(candidates: ["/nope/rclone"]).locate())
-        XCTAssertEqual(RcloneLocator.defaultCandidates, ["/opt/homebrew/bin/rclone", "/usr/local/bin/rclone"])
+        XCTAssertEqual(RcloneLocator.defaultCandidates, ["/opt/homebrew/bin/rclone", "/usr/local/bin/rclone",
+                                                         RcloneLocator.installedBinaryPath])
+        XCTAssertTrue(RcloneLocator.installedBinaryPath.hasSuffix("/Library/Application Support/Koffer/bin/rclone"))
     }
 }

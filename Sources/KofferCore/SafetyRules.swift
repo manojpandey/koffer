@@ -232,8 +232,17 @@ public enum SafetyRules {
                 return .refused("The removed-items folder in the command does not match the job.")
             }
             return .ok
-        case "about", "size", "version", "lsjson":
+        case "about", "size", "version", "lsjson", "listremotes":
+            // Read-only.
             return .ok
+        case "mkdir":
+            // Creates one folder; never removes anything.
+            guard arguments.count == 2, RcloneLocation.parse(arguments[1]) != nil else {
+                return .refused("Koffer only creates one folder at a time, given as remote:folder or a full path.")
+            }
+            return .ok
+        case "config":
+            return assertSafeConfig(arguments)
         case "purge":
             guard arguments.count >= 2 else { return .refused("Purge without a target.") }
             let target = arguments[1]
@@ -251,5 +260,49 @@ public enum SafetyRules {
         default:
             return .refused("Koffer does not run 'rclone \(verb)'.")
         }
+    }
+
+    /// `rclone config ...`: only signing in again and reading the redacted settings of one remote.
+    /// Creating, deleting, renaming remotes or changing their settings is refused.
+    static func assertSafeConfig(_ arguments: [String]) -> SafetyVerdict {
+        guard arguments.count >= 3 else { return .refused("Incomplete rclone config command.") }
+        let sub: String = arguments[1]
+        let name: String = arguments[2]
+        let rest: [String] = Array(arguments.dropFirst(3))
+        guard isPlainRemoteName(name) else { return .refused("That is not a remote name Koffer can use.") }
+        switch sub {
+        case "reconnect":
+            guard name.hasSuffix(":") else { return .refused("rclone config reconnect needs a remote name ending in a colon.") }
+            for a in rest where a != "--auto-confirm" {
+                return .refused("Koffer does not pass \(a) to rclone config reconnect.")
+            }
+            return .ok
+        case "redacted":
+            guard rest.isEmpty else { return .refused("Koffer does not pass extra options to rclone config redacted.") }
+            return .ok
+        case "update":
+            guard !name.hasSuffix(":") else { return .refused("rclone config update needs a remote name without a colon.") }
+            guard !rest.isEmpty else { return .refused("Nothing to answer.") }
+            for a in rest {
+                if a == "--no-output" || a == "--auto-confirm" { continue }
+                // config_* keys only answer rclone's sign-in questions; rclone never saves them.
+                if a.hasPrefix("config_") && a.contains("=") { continue }
+                return .refused("Koffer only answers rclone's sign-in questions; it does not change a remote's settings.")
+            }
+            return .ok
+        default:
+            return .refused("Koffer does not run 'rclone config \(sub)'.")
+        }
+    }
+
+    /// "onedrive" or "onedrive:", without slashes, spaces at the ends, or a leading dash (which rclone would read as a flag).
+    static func isPlainRemoteName(_ raw: String) -> Bool {
+        var base: String = raw
+        if base.hasSuffix(":") { base.removeLast() }
+        if base.isEmpty || base.hasPrefix("-") { return false }
+        if base != base.trimmingCharacters(in: .whitespacesAndNewlines) { return false }
+        let bad: Set<Character> = [":", "/", "\\", "=", "\n", "\r"]
+        for c in base where bad.contains(c) { return false }
+        return true
     }
 }
