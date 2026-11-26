@@ -377,7 +377,7 @@ final class AppModel: ObservableObject {
         }
         if engine.rclonePath == nil { return "Finish the setup step above first." }
         if engine.needsReconnect { return "Sign in to \(cloudName(for: job)) again first." }
-        if !job.enabled { return "This job is switched off. You can switch it on in Settings." }
+        if !job.enabled { return "This backup is switched off. Right-click it and choose Switch on." }
         if let volume = job.requiredVolume, !engine.mountedVolumes.contains(volume) {
             return "Plug in \(volume) first."
         }
