@@ -160,3 +160,80 @@ the published properties above and uses `Format` for every number.
 ## Module E: build, CI, docs
 
 Files: `scripts/*`, `.github/workflows/*`, `README.md`, `Resources/*`.
+
+---
+
+# v0.2 additions: everything through the panel, no Terminal
+
+Product rule: the user never opens Terminal. Installing rclone, checking the connection, signing in again,
+creating a backup, choosing and creating cloud folders all happen in the UI.
+
+## Engine additions (Module A)
+
+```swift
+public struct EngineError: Error, Equatable { public let message: String; public init(_ message: String) }
+
+public enum RemoteState: Equatable {
+    case unknown
+    case checking
+    case connected(used: Int64?, total: Int64?, free: Int64?)
+    case failed(String)            // plain words; e.g. "OneDrive needs you to sign in again"
+}
+
+public enum TaskState: Equatable { case idle, running(String), failed(String), succeeded }
+
+extension SyncEngine {
+    @Published public private(set) var remotes: [String]                     // e.g. ["onedrive:"], from `rclone listremotes`
+    @Published public private(set) var remoteStates: [String: RemoteState]   // keyed by remote name with colon
+    @Published public private(set) var installState: TaskState               // installing rclone
+    @Published public private(set) var reconnectState: TaskState             // signing in again
+
+    public func refreshRemotes(force: Bool)      // listremotes, then `about --json` per remote; skips if checked < 60 s ago unless force; no-op while a backup runs
+    public func listFolders(remote: String, path: String) async -> Result<[String], EngineError>   // folder names, sorted, `lsjson --dirs-only`
+    public func createFolder(remote: String, path: String) async -> Result<Bool, EngineError>      // `rclone mkdir`; true on success
+    public func proposedJob(name: String, source: String, remote: String, remotePath: String) -> SyncJob
+        // destination = remote + remotePath; removedRoot = sibling folder "_<last component>_removed";
+        // requiredVolume = volume name when source is under /Volumes/<name>/...; enabled = true; previewApproved = false;
+        // autoSyncOnMount = (requiredVolume != nil); unique id derived from the name
+    public func addJob(_ job: SyncJob) -> SafetyVerdict     // SafetyRules.check, then save to config; .refused(reason) changes nothing
+    public func removeJob(id: String) -> SafetyVerdict      // forgets the job in config only; never touches the cloud; refused while that job runs
+    public var homebrewPath: String? { get }                // /opt/homebrew/bin/brew or /usr/local/bin/brew if executable
+    public func installRclone()                             // see below; ends with recheckRclone() and refreshRemotes(force: true)
+    public func reconnect(remote: String)                   // see below
+}
+```
+
+`installRclone()`: if Homebrew exists run `brew install rclone` as a child process (installState = .running("Installing rclone with Homebrew…")).
+Otherwise download the official build for this Mac's CPU from `https://downloads.rclone.org/rclone-current-osx-<arm64|amd64>.zip`
+with URLSession, unzip with `/usr/bin/ditto -x -k`, and place the binary at
+`~/Library/Application Support/Koffer/bin/rclone` (chmod 755). `RcloneLocator.defaultCandidates` gains that path (last).
+Failure -> `.failed(plain words)`; never leave a half-written binary in place.
+
+`reconnect(remote:)`: must work without Terminal. rclone's sign-in opens the default browser by itself and waits on a
+local callback. Drive it as a child process and answer its prompts programmatically (investigate with the real binary:
+`rclone config reconnect <remote>: --help`, `--auto-confirm`, and the `--non-interactive` / `--continue --state --result`
+protocol). reconnectState = .running("Waiting for you to sign in in your browser…") with a timeout (5 min) and cancel via `cancelReconnect()`.
+On success: needsReconnect = false, refreshRemotes(force: true).
+
+`SafetyRules.assertSafe` must keep refusing anything destructive; `mkdir`, `listremotes`, `lsjson`, `config reconnect` are allowed, `purge` only on a removedRoot.
+
+## UI additions (Module D)
+
+No `@State`, `@Binding`, `@AppStorage`, `@FocusState` anywhere (see ground rules): every piece of view state is a
+`@Published` property on an ObservableObject (`AppModel` or a new `NewBackupModel`), bound with `$model.property`.
+
+- Connection row at the top of the panel for the selected job's remote: "OneDrive connected · 412 GB free of 1 TB", "Checking…",
+  or a failure with a "Sign in again" button (-> engine.reconnect). Refresh when the panel appears.
+- Every job shows its route: local folder -> remote:path (middle-truncated, selectable).
+- rclone missing card: one "Install rclone" button (-> engine.installRclone) with progress and failure text. No commands shown.
+- "New backup…" button opens a separate window (`Window` scene, id "new-backup", opened with `@Environment(\.openWindow)`;
+  call `NSApp.activate(ignoringOtherApps: true)`), three steps on one screen:
+  1. Folder on this Mac: "Choose…" -> NSOpenPanel (directories only).
+  2. Where in the cloud: remote picker (if more than one) + a folder browser (breadcrumb, list of folders, double-click or
+     chevron to enter, "New folder" with a name field that creates it immediately via engine.createFolder and enters it).
+     The chosen destination must not be the remote's root.
+  3. Name (prefilled from the local folder name) and a summary sentence: "Koffer will copy <local> to <remote:path>.
+     Removed files are kept in <removed folder>." -> "Create backup" (engine.addJob; show the refusal reason inline if refused),
+     then select the new job in the panel and offer "What will change?".
+- Settings for a job gains "Forget this backup…" (confirmation; says nothing in the cloud is deleted) for non-built-in jobs.
+- Reconnect card uses engine.reconnect / reconnectState instead of Terminal. `TerminalLauncher` is no longer used by the UI.
