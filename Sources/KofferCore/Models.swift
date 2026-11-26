@@ -56,6 +56,29 @@ public extension SyncJob {
     static func builtIn() -> [SyncJob] { [testJob()] }
 }
 
+/// A local path fragment that must never be sent to certain remotes (e.g. private finance folders).
+public struct PrivatePathRule: Codable, Hashable {
+    /// Case-insensitive substring matched against the job's source path.
+    public var pathContains: String
+    /// Remote names with colon (e.g. "onedrive:") this path must never go to.
+    public var forbiddenRemotes: [String]
+    public init(pathContains: String, forbiddenRemotes: [String]) {
+        self.pathContains = pathContains; self.forbiddenRemotes = forbiddenRemotes
+    }
+}
+
+/// Everything user-specific lives here, in ~/Library/Application Support/Koffer/config.json,
+/// never in source code. First launch seeds it with the test job only.
+public struct KofferConfig: Codable, Equatable {
+    public var jobs: [SyncJob]
+    /// Case-insensitive path fragments that may never be a job source or inside one (folders to leave alone).
+    public var neverSync: [String]
+    public var privatePaths: [PrivatePathRule]
+    public init(jobs: [SyncJob] = SyncJob.builtIn(), neverSync: [String] = [], privatePaths: [PrivatePathRule] = []) {
+        self.jobs = jobs; self.neverSync = neverSync; self.privatePaths = privatePaths
+    }
+}
+
 public enum EngineStatus: Equatable {
     case idle
     /// Pre-flight checks; the string is a short plain-words description ("Checking free space").
