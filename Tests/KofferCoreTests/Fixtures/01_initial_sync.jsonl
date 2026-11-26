@@ -1,0 +1,39 @@
+{"time":"2026-11-26T21:37:15.459237738+01:00","level":"notice","msg":"Config file \"/root/.config/rclone/rclone.conf\" not found - using defaults","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.461087794+01:00","level":"info","msg":"Making map for --track-renames","object":"Local file system at /home/claude/tools/lab/dst","objectType":"*local.Fs","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.461137772+01:00","level":"info","msg":"Finished making map for --track-renames","object":"Local file system at /home/claude/tools/lab/dst","objectType":"*local.Fs","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.468613815+01:00","level":"info","msg":"Copied (new)","size":3,"object":"B/note.txt","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.468746364+01:00","level":"info","msg":"Copied (new)","size":20037,"object":"A/photos/img_1.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.468850132+01:00","level":"info","msg":"Copied (new)","size":20370,"object":"A/photos/img_10.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.468951959+01:00","level":"info","msg":"Copied (new)","size":20407,"object":"A/photos/img_11.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.469148859+01:00","level":"info","msg":"Copied (new)","size":20444,"object":"A/photos/img_12.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.469253154+01:00","level":"info","msg":"Copied (new)","size":20481,"object":"A/photos/img_13.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.469347955+01:00","level":"info","msg":"Copied (new)","size":20518,"object":"A/photos/img_14.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.469438775+01:00","level":"info","msg":"Copied (new)","size":20555,"object":"A/photos/img_15.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.469590504+01:00","level":"info","msg":"Copied (new)","size":20592,"object":"A/photos/img_16.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.469687659+01:00","level":"info","msg":"Copied (new)","size":20629,"object":"A/photos/img_17.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.469787856+01:00","level":"info","msg":"Copied (new)","size":20666,"object":"A/photos/img_18.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.470410891+01:00","level":"info","msg":"Copied (new)","size":20703,"object":"A/photos/img_19.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.470560351+01:00","level":"info","msg":"Copied (new)","size":20074,"object":"A/photos/img_2.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.470840438+01:00","level":"info","msg":"Copied (new)","size":20814,"object":"A/photos/img_22.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.471037381+01:00","level":"info","msg":"Copied (new)","size":20851,"object":"A/photos/img_23.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.471177255+01:00","level":"info","msg":"Copied (new)","size":20740,"object":"A/photos/img_20.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.4712197+01:00","level":"info","msg":"Copied (new)","size":20925,"object":"A/photos/img_25.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.471375705+01:00","level":"info","msg":"Copied (new)","size":20999,"object":"A/photos/img_27.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.471414122+01:00","level":"info","msg":"Copied (new)","size":20777,"object":"A/photos/img_21.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.471495829+01:00","level":"info","msg":"Copied (new)","size":21036,"object":"A/photos/img_28.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.471616279+01:00","level":"info","msg":"Copied (new)","size":20111,"object":"A/photos/img_3.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.47173785+01:00","level":"info","msg":"Copied (new)","size":21110,"object":"A/photos/img_30.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.471785516+01:00","level":"info","msg":"Copied (new)","size":20888,"object":"A/photos/img_24.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.471854752+01:00","level":"info","msg":"Copied (new)","size":20148,"object":"A/photos/img_4.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.472043959+01:00","level":"info","msg":"Copied (new)","size":20962,"object":"A/photos/img_26.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.472206968+01:00","level":"info","msg":"Copied (new)","size":21073,"object":"A/photos/img_29.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.472502357+01:00","level":"info","msg":"Copied (new)","size":20185,"object":"A/photos/img_5.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.472860003+01:00","level":"info","msg":"Copied (new)","size":20222,"object":"A/photos/img_6.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.473344646+01:00","level":"info","msg":"Copied (new)","size":20296,"object":"A/photos/img_8.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.473383171+01:00","level":"info","msg":"Copied (new)","size":20333,"object":"A/photos/img_9.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.473409027+01:00","level":"info","msg":"Copied (new)","size":20259,"object":"A/photos/img_7.jpg","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.482764527+01:00","level":"info","msg":"Copied (new)","size":3000000,"object":"B/big.mov","objectType":"*local.Object","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.482833839+01:00","level":"info","msg":"Set directory modification time (using DirSetModTime)","object":"A/photos","objectType":"string","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.482855773+01:00","level":"info","msg":"Set directory modification time (using DirSetModTime)","object":"B","objectType":"string","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.48286642+01:00","level":"info","msg":"Set directory modification time (using DirSetModTime)","object":"A","objectType":"string","source":"slog/logger.go:256"}
+{"time":"2026-11-26T21:37:15.482909455+01:00","level":"info","msg":"\nTransferred:   \t    3.450 MiB / 3.450 MiB, 100%, 0 B/s, ETA -\nChecks:                 0 / 0, -, Listed 35\nTransferred:           32 / 32, 100%\nElapsed time:         0.0s\n\n","stats":{"bytes":3617208,"checks":0,"deletedDirs":0,"deletes":0,"elapsedTime":0.022685166,"errors":0,"eta":null,"fatalError":false,"listed":35,"renames":0,"retryError":false,"serverSideCopies":0,"serverSideCopyBytes":0,"serverSideMoveBytes":0,"serverSideMoves":0,"speed":0,"totalBytes":3617208,"totalChecks":0,"totalTransfers":32,"transferTime":0.016396757,"transfers":32},"source":"slog/logger.go:256"}
