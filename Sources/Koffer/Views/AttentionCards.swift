@@ -71,51 +71,133 @@ struct AttentionCard<Actions: View>: View {
     }
 }
 
-/// The only place the word "rclone" appears.
+/// The only place the word "rclone" appears. One button installs it; no commands are shown.
 struct RcloneMissingCard: View {
-    @EnvironmentObject var model: AppModel
-    private static let command: String = "brew install rclone"
-    private var copyTitle: String { model.commandCopied ? "Copied" : "Copy" }
-
     var body: some View {
         AttentionCard(symbol: "wrench.and.screwdriver.fill", tint: Theme.warning, title: "One setup step",
-                      message: "Koffer uses rclone, a free tool, to talk to OneDrive. Install it once in Terminal:") {
-            VStack(alignment: .leading, spacing: Theme.Space.s) {
-                HStack(spacing: Theme.Space.s) {
-                    Text(RcloneMissingCard.command)
-                        .font(.system(size: 12, weight: .regular, design: .monospaced))
-                        .textSelection(.enabled)
-                    Spacer(minLength: Theme.Space.xs)
-                    Button {
-                        model.copyToClipboard(RcloneMissingCard.command)
-                        model.commandCopied = true
-                    } label: {
-                        Label(copyTitle, systemImage: model.commandCopied ? "checkmark" : "doc.on.doc")
-                    }
-                    .buttonStyle(QuietButtonStyle(compact: true))
-                }
-                .padding(Theme.Space.s)
-                .background(RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous).fill(Theme.quietFill))
-                Button("Check again") { model.engine.recheckRclone() }
-                    .buttonStyle(QuietButtonStyle(compact: true))
-            }
+                      message: "Koffer needs a small free helper called rclone to talk to your cloud storage.") {
+            RcloneInstallActions()
         }
     }
 }
 
+struct RcloneInstallActions: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.s) {
+            switch model.engine.installState {
+            case .idle:
+                InstallButton(title: "Install rclone")
+                InstallSubtitle()
+            case .running(let message):
+                TaskProgressLine(message: message)
+            case .failed(let message):
+                TaskFailureText(message: message)
+                InstallButton(title: "Try again")
+            case .succeeded:
+                Text("Installed. Getting it ready\u{2026}")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Button("Check again") { model.engine.recheckRclone() }
+                    .buttonStyle(QuietButtonStyle(compact: true))
+            }
+        }
+        .padding(.top, 2)
+    }
+}
+
+private struct InstallButton: View {
+    @EnvironmentObject var model: AppModel
+    let title: String
+
+    var body: some View {
+        Button(title) { model.engine.installRclone() }
+            .buttonStyle(GradientButtonStyle())
+    }
+}
+
+private struct InstallSubtitle: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        Text(model.engine.homebrewPath != nil ? "Installs with Homebrew" : "Downloads it from rclone.org")
+            .font(.system(size: 11))
+            .foregroundStyle(.tertiary)
+    }
+}
+
+/// Small spinner and a plain-words step, e.g. "Waiting for you to sign in in your browser…".
+struct TaskProgressLine: View {
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .center, spacing: Theme.Space.s) {
+            ProgressView()
+                .controlSize(.small)
+            Text(message)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+struct TaskFailureText: View {
+    let message: String
+
+    var body: some View {
+        Label {
+            Text(message)
+                .fixedSize(horizontal: false, vertical: true)
+        } icon: {
+            Image(systemName: "exclamationmark.circle.fill")
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(Theme.failure)
+    }
+}
+
+/// Sign in again, straight from the panel: Koffer opens the browser and waits.
 struct ReconnectCard: View {
     @EnvironmentObject var model: AppModel
     let job: SyncJob
 
     var body: some View {
+        let name: String = model.cloudName(for: job)
         AttentionCard(symbol: "person.crop.circle.badge.exclamationmark", tint: Theme.warning,
-                      title: "Sign in to OneDrive again",
-                      message: "OneDrive wants you to confirm it's you. This opens Terminal, which sends you to your browser to sign in.") {
-            Button("Reconnect OneDrive") {
-                TerminalLauncher.run(model.engine.reconnectCommand(for: job.id))
-            }
-            .buttonStyle(QuietButtonStyle(compact: true))
+                      title: "Sign in to \(name) again",
+                      message: "\(name) wants you to confirm it\u{2019}s you. Koffer opens your browser so you can sign in.") {
+            ReconnectActions(remote: model.reconnectRemote(for: job))
         }
+    }
+}
+
+struct ReconnectActions: View {
+    @EnvironmentObject var model: AppModel
+    let remote: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.s) {
+            switch model.engine.reconnectState {
+            case .idle, .succeeded:
+                signInButton("Sign in again")
+            case .running(let message):
+                TaskProgressLine(message: message)
+                Button("Cancel") { model.engine.cancelReconnect() }
+                    .buttonStyle(QuietButtonStyle(compact: true))
+            case .failed(let message):
+                TaskFailureText(message: message)
+                signInButton("Try again")
+            }
+        }
+    }
+
+    private func signInButton(_ title: String) -> some View {
+        Button(title) { model.engine.reconnect(remote: remote) }
+            .buttonStyle(QuietButtonStyle(compact: true))
+            .disabled(remote.isEmpty || model.engine.status.isBusy)
     }
 }
 

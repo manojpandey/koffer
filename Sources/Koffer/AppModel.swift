@@ -38,6 +38,8 @@ struct RunNumbers: Equatable {
 final class AppModel: ObservableObject {
 
     let engine: SyncEngine
+    /// State of the "New backup" window.
+    let newBackup: NewBackupModel
 
     private let notifier: Notifier
     private let power: PowerAssertion
@@ -58,10 +60,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var launchAtLogin: Bool
     @Published var loginError: String? = nil
     @Published var showSettings: Bool = false
-    // View-local state lives here instead of in `@State`: with newer SDKs `@State` is a macro, and the
-    // Command Line Tools (without Xcode) ship no plugin for it, so `@State` would not compile there.
+    // View-local state lives here instead of in SwiftUI's State property wrapper: with newer SDKs that
+    // wrapper is a macro, and the Command Line Tools (without Xcode) ship no plugin for it.
     @Published var panelContentHeight: CGFloat = 420
-    @Published var commandCopied: Bool = false
+    @Published var confirmForget: Bool = false
+    /// Why "Forget this backup" was refused, shown inline in Settings.
+    @Published var forgetRefusal: String? = nil
     @Published var confirmEnable: Bool = false
     @Published var confirmEmpty: Bool = false
     @Published var showAllHistory: Bool = false
@@ -80,6 +84,7 @@ final class AppModel: ObservableObject {
         self.power = power
         self.historyStore = history
         self.engine = engine
+        self.newBackup = NewBackupModel(engine: engine)
         self.volumeWatcher = VolumeWatcher(
             onMount: { (name: String) in Task { @MainActor in engine.volumeMounted(name) } },
             onUnmount: { (name: String) in Task { @MainActor in engine.volumeUnmounted(name) } }
@@ -133,7 +138,68 @@ final class AppModel: ObservableObject {
         selectedJobID = job.id
         expandedKinds = []
         showAllHistory = false
+        forgetRefusal = nil
         if showSettings { refreshRemovedSize(for: job) }
+    }
+
+    // MARK: Panel
+
+    /// Called when the panel opens: check the cloud connection (the engine skips it if checked recently).
+    func panelAppeared() {
+        guard engine.rclonePath != nil else { return }
+        engine.refreshRemotes(force: false)
+    }
+
+    func refreshConnection() {
+        guard engine.rclonePath != nil else { return }
+        engine.refreshRemotes(force: true)
+    }
+
+    /// Account to sign in to again for this job: its own, else the first known one ("" if none).
+    func reconnectRemote(for job: SyncJob?) -> String {
+        if let job = job, !job.remoteName.isEmpty { return job.remoteName }
+        return engine.remotes.first ?? ""
+    }
+
+    /// "OneDrive", "Google Drive", ... for the job's cloud account.
+    func cloudName(for job: SyncJob?) -> String {
+        let remote: String = reconnectRemote(for: job)
+        return remote.isEmpty ? "your cloud storage" : DisplayNames.friendly(remote: remote)
+    }
+
+    // MARK: New backup
+
+    /// Prepares the form before the window is shown; keeps an open form as it is.
+    func prepareNewBackup() {
+        newBackup.wasRequested = true
+        if !newBackup.isOpen {
+            newBackup.reset(preferredRemote: selectedJob?.remoteName)
+        }
+        if engine.rclonePath != nil {
+            engine.refreshRemotes(force: false)
+        }
+    }
+
+    /// After "Create backup" succeeded: show the new job in the panel.
+    func didCreate(_ job: SyncJob) {
+        showSettings = false
+        selectedJobID = job.id
+        expandedKinds = []
+        showAllHistory = false
+        forgetRefusal = nil
+    }
+
+    // MARK: Forget
+
+    func forget(_ job: SyncJob) {
+        let verdict: SafetyVerdict = engine.removeJob(id: job.id)
+        if let reason = verdict.reason {
+            forgetRefusal = reason
+            return
+        }
+        forgetRefusal = nil
+        showSettings = false
+        selectedJobID = AppModel.initialSelection(stored: nil, engine: engine)
     }
 
     // MARK: Settings
@@ -175,16 +241,7 @@ final class AppModel: ObservableObject {
 
     /// Last path component of the removed-items folder, e.g. "onedrive:_x_removed" -> "_x_removed".
     func removedFolderName(for job: SyncJob) -> String {
-        let root: String = job.removedRoot
-        let afterColon: String
-        if let idx = root.firstIndex(of: ":") {
-            afterColon = String(root[root.index(after: idx)...])
-        } else {
-            afterColon = root
-        }
-        let parts: [Substring] = afterColon.split(separator: "/")
-        if let last = parts.last { return String(last) }
-        return afterColon.isEmpty ? "the removed folder" : afterColon
+        DisplayNames.lastComponent(ofCloudPath: job.removedRoot)
     }
 
     private func isMine(_ job: SyncJob) -> Bool {
@@ -215,7 +272,7 @@ final class AppModel: ObservableObject {
             }
         }
         if engine.rclonePath == nil { return .setup("One setup step first") }
-        if engine.needsReconnect { return .setup("Sign in to OneDrive again") }
+        if engine.needsReconnect { return .setup("Sign in to \(cloudName(for: job)) again") }
         if !job.enabled { return .off }
         if let volume = job.requiredVolume, !engine.mountedVolumes.contains(volume) {
             return .waitingForDisk(volume)
@@ -303,7 +360,7 @@ final class AppModel: ObservableObject {
             return isMine(job) ? nil : "Koffer is busy with \(activeJobName). Stop it to start this one."
         }
         if engine.rclonePath == nil { return "Finish the setup step above first." }
-        if engine.needsReconnect { return "Reconnect OneDrive first." }
+        if engine.needsReconnect { return "Sign in to \(cloudName(for: job)) again first." }
         if !job.enabled { return "This job is switched off. You can switch it on in Settings." }
         if let volume = job.requiredVolume, !engine.mountedVolumes.contains(volume) {
             return "Plug in \(volume) first."

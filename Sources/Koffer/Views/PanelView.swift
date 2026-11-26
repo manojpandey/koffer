@@ -22,6 +22,7 @@ struct PanelView: View {
                 DispatchQueue.main.async { model.panelContentHeight = height }
             }
         }
+        .onAppear { model.panelAppeared() }
     }
 }
 
@@ -65,6 +66,7 @@ private struct JobPanelTop: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.l) {
             HeaderView(job: job)
+            JobContextView(job: job)
             if model.hasAttention(for: job) {
                 AttentionStack(job: job)
             }
@@ -113,10 +115,11 @@ struct NoJobsView: View {
                 .foregroundStyle(.secondary)
             Text("Nothing to back up yet")
                 .font(.system(size: 17, weight: .semibold))
-            Text("Add a folder to Koffer's settings file, then open this menu again.")
+            Text("Choose a folder on this Mac and a place in the cloud, and Koffer keeps it backed up.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            NewBackupButton(style: .prominent)
             Button("Quit Koffer") { model.quit() }
                 .buttonStyle(QuietButtonStyle())
         }

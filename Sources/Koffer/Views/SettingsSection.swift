@@ -1,7 +1,7 @@
 import SwiftUI
 import KofferCore
 
-/// Bottom row: Settings toggle and Quit.
+/// Bottom row: Settings toggle, New backup and Quit.
 struct FooterView: View {
     @EnvironmentObject var model: AppModel
     let job: SyncJob
@@ -12,6 +12,7 @@ struct FooterView: View {
                 Label("Settings", systemImage: model.showSettings ? "gearshape.fill" : "gearshape")
             }
             .accessibilityValue(settingsState)
+            NewBackupButton(style: .footer)
             Spacer(minLength: Theme.Space.s)
             Button("Quit Koffer") { model.quit() }
                 .keyboardShortcut("q", modifiers: .command)
@@ -38,6 +39,9 @@ struct SettingsSection: View {
                     .disabled(!job.enabled)
             }
             RemovedItemsRow(job: job)
+            if !job.isTest {
+                ForgetJobRow(job: job)
+            }
             Rectangle().fill(Theme.hairline).frame(height: 0.5)
             Toggle("Launch at login", isOn: loginBinding)
             if let error = model.loginError {
@@ -129,5 +133,43 @@ struct RemovedItemsRow: View {
         } message: {
             Text("This permanently deletes \(sizeText) of removed files kept in \(model.removedFolderName(for: job)). This can't be undone.")
         }
+    }
+}
+
+/// "Forget this backup…": removes the job from Koffer only. Nothing in the cloud or on the disk is deleted.
+struct ForgetJobRow: View {
+    @EnvironmentObject var model: AppModel
+    let job: SyncJob
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s) {
+                Text("Stop backing up this folder")
+                Spacer(minLength: Theme.Space.s)
+                Button("Forget this backup\u{2026}") { model.confirmForget = true }
+                    .buttonStyle(QuietButtonStyle(compact: true))
+                    .disabled(isRunning)
+            }
+            if let reason = model.forgetRefusal {
+                TaskFailureText(message: reason)
+            }
+        }
+        .confirmationDialog("Forget \u{201C}\(job.name)\u{201D}?", isPresented: $model.confirmForget,
+                            titleVisibility: .visible) {
+            Button("Forget backup") { model.forget(job) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(forgetMessage)
+        }
+    }
+
+    private var isRunning: Bool {
+        model.engine.status.isBusy && model.engine.activeJobID == job.id
+    }
+
+    private var forgetMessage: String {
+        "Koffer stops backing up \(DisplayNames.abbreviated(job.source)). "
+            + "Nothing in the cloud or on the disk is deleted: \(job.destination) "
+            + "and \(model.removedFolderName(for: job)) stay as they are."
     }
 }

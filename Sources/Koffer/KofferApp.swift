@@ -13,5 +13,11 @@ struct KofferApp: App {
             MenuBarLabel(model: model)
         }
         .menuBarExtraStyle(.window)
+
+        Window("New backup", id: NewBackupView.windowID) {
+            NewBackupView()
+                .environmentObject(model)
+        }
+        .windowResizability(.contentSize)
     }
 }

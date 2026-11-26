@@ -19,6 +19,7 @@ struct HeaderView: View {
                 Spacer(minLength: Theme.Space.s)
                 if model.engine.jobs.count <= 1 {
                     JobHints(job: job)
+                    NewBackupButton(style: .icon)
                 }
             }
             if model.engine.jobs.count > 1 {
@@ -46,16 +47,21 @@ struct JobPicker: View {
                     JobPill(job: job, isSelected: job.id == selected.id) { model.select(job) }
                 }
                 Spacer(minLength: 0)
+                NewBackupButton(style: .icon)
             }
         } else {
-            Picker("Folder", selection: $model.selectedJobID) {
-                ForEach(model.engine.jobs) { (job: SyncJob) in
-                    Text(menuTitle(job)).tag(job.id)
+            HStack(spacing: Theme.Space.xs) {
+                Picker("Folder", selection: $model.selectedJobID) {
+                    ForEach(model.engine.jobs) { (job: SyncJob) in
+                        Text(menuTitle(job)).tag(job.id)
+                    }
                 }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+                Spacer(minLength: 0)
+                NewBackupButton(style: .icon)
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .fixedSize()
         }
     }
 
