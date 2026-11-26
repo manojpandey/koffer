@@ -1,0 +1,40 @@
+{
+  "jobs": [
+    {
+      "id": "test",
+      "name": "Test folder",
+      "source": "/Users/you/Koffer Test",
+      "destination": "onedrive:_koffer_test",
+      "removedRoot": "onedrive:_koffer_test_removed",
+      "requiredVolume": null,
+      "autoSyncOnMount": false,
+      "enabled": true,
+      "previewApproved": false,
+      "extraLogDirectory": null,
+      "isTest": true
+    },
+    {
+      "id": "archive",
+      "name": "Archive",
+      "source": "/Volumes/MyDisk/Archive",
+      "destination": "onedrive:Archive",
+      "removedRoot": "onedrive:_Archive_removed",
+      "requiredVolume": "MyDisk",
+      "autoSyncOnMount": true,
+      "enabled": true,
+      "previewApproved": false,
+      "extraLogDirectory": "/Volumes/MyDisk/Backup Logs",
+      "isTest": false
+    }
+  ],
+  "neverSync": [
+    "/.Trash",
+    "/Library/Keychains"
+  ],
+  "privatePaths": [
+    {
+      "pathContains": "Private Papers",
+      "forbiddenRemotes": ["onedrive:"]
+    }
+  ]
+}

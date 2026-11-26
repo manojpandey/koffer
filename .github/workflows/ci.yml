@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tool versions
+        run: |
+          swift --version
+          sw_vers
+
+      - name: Install rclone (for the integration tests)
+        run: brew install rclone
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      - name: Build the app bundle
+        run: ./scripts/build.sh
+
+      - name: Verify the app bundle
+        run: |
+          test -x build/Koffer.app/Contents/MacOS/Koffer
+          codesign --verify --deep --strict --verbose=2 build/Koffer.app
+
+      - name: Zip the app
+        run: ditto -c -k --keepParent build/Koffer.app build/Koffer.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Koffer-app
+          path: build/Koffer.zip

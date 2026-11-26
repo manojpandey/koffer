@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.koffer.app</string>
+	<key>CFBundleName</key>
+	<string>Koffer</string>
+	<key>CFBundleDisplayName</key>
+	<string>Koffer</string>
+	<key>CFBundleExecutable</key>
+	<string>Koffer</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Koffer reads the folder on your external disk so it can back it up.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Koffer reads your Documents folder so it can back it up.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Koffer reads your Desktop folder so it can back it up.</string>
+</dict>
+</plist>
