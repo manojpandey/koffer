@@ -23,19 +23,32 @@ public struct RcloneLocation: Equatable {
     public var isLocal: Bool { remote.isEmpty }
 
     /// "/abs/path" -> local. "name:path" -> remote. Anything else (relative path) -> nil.
+    /// Paths with "." or ".." parts are refused (nil): rclone resolves them, so "x:Backup/_removed/.."
+    /// would really mean "x:Backup" and slip past the overlap checks.
     public static func parse(_ raw: String) -> RcloneLocation? {
         let s = raw.trimmingCharacters(in: .whitespaces)
         if s.isEmpty { return nil }
         if s.hasPrefix("/") {
-            return RcloneLocation(remote: "", path: SafetyRules.normalizeLocal(s))
+            let local: String = SafetyRules.normalizeLocal(s)
+            if RcloneLocation.hasDotParts(local) { return nil }
+            return RcloneLocation(remote: "", path: local)
         }
         guard let idx = s.firstIndex(of: ":") else { return nil }
         let remote = String(s[...idx])
         if remote.count < 2 { return nil }
-        var path = String(s[s.index(after: idx)...])
-        while path.hasPrefix("/") { path.removeFirst() }
-        while path.hasSuffix("/") { path.removeLast() }
-        return RcloneLocation(remote: remote, path: path)
+        let rest = String(s[s.index(after: idx)...])
+        if RcloneLocation.hasDotParts(rest) { return nil }
+        // Drop leading, trailing and doubled slashes, as rclone does.
+        let parts: [String] = rest.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        return RcloneLocation(remote: remote, path: parts.joined(separator: "/"))
+    }
+
+    static func hasDotParts(_ path: String) -> Bool {
+        for part in path.split(separator: "/", omittingEmptySubsequences: true) {
+            let t = part.trimmingCharacters(in: .whitespaces)
+            if t == "." || t == ".." { return true }
+        }
+        return false
     }
 
     /// True when `self` is `other` or lies inside it. Case-insensitive (OneDrive and APFS usually are).
@@ -68,43 +81,42 @@ public enum SafetyRules {
             return .refused("The folder to back up must be a full path starting with /.")
         }
         let source = normalizeLocal(rawSource)
-        let lowerSource = source.lowercased()
+        // rclone follows a symlink given as the source, so check where it really points as well.
+        let resolved = normalizeLocal((source as NSString).resolvingSymlinksInPath)
+        let candidates: [String] = resolved == source ? [source] : [source, resolved]
 
-        // Folders the user wants left alone.
-        for fragment in config.neverSync {
-            let f = fragment.trimmingCharacters(in: .whitespaces).lowercased()
-            if f.isEmpty { continue }
-            if lowerSource.contains(f) {
-                return .refused("This folder is on the never-sync list (\(fragment)).")
+        for candidate in candidates {
+            let lowerSource = candidate.lowercased()
+
+            // Folders the user wants left alone.
+            for fragment in config.neverSync {
+                let f = fragment.trimmingCharacters(in: .whitespaces).lowercased()
+                if f.isEmpty { continue }
+                if lowerSource.contains(f) {
+                    return .refused("This folder is on the never-sync list (\(fragment)).")
+                }
             }
-        }
 
-        // Private folders that must never go to certain remotes.
-        let remote = job.remoteName.lowercased()
-        for rule in config.privatePaths {
-            let f = rule.pathContains.trimmingCharacters(in: .whitespaces).lowercased()
-            if f.isEmpty { continue }
-            guard lowerSource.contains(f) else { continue }
-            let forbidden: [String] = rule.forbiddenRemotes.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-            if !remote.isEmpty && forbidden.contains(remote) {
+            // Private folders that must never go to certain remotes.
+            for rule in privateRules(for: job, config: config) where lowerSource.contains(rule) {
                 return .refused("This folder is private and may not be sent to \(job.remoteName).")
             }
-        }
 
-        // Whole disks, the home folder and other too-broad sources.
-        let components: [String] = source.split(separator: "/").map(String.init)
-        if components.isEmpty {
-            return .refused("Backing up the whole computer is not allowed. Pick a folder.")
-        }
-        if components.count == 1 {
-            return .refused("That folder is too broad to back up. Pick a folder inside it.")
-        }
-        if components[0].lowercased() == "volumes" && components.count <= 2 {
-            return .refused("Backing up a whole disk is not allowed. Pick a folder on it.")
-        }
-        let home = normalizeLocal(homeDirectory).lowercased()
-        if !home.isEmpty && lowerSource == home {
-            return .refused("Backing up your whole home folder is not allowed. Pick a folder inside it.")
+            // Whole disks, the home folder and other too-broad sources.
+            let components: [String] = candidate.split(separator: "/").map(String.init)
+            if components.isEmpty {
+                return .refused("Backing up the whole computer is not allowed. Pick a folder.")
+            }
+            if components.count == 1 {
+                return .refused("That folder is too broad to back up. Pick a folder inside it.")
+            }
+            if components[0].lowercased() == "volumes" && components.count <= 2 {
+                return .refused("Backing up a whole disk is not allowed. Pick a folder on it.")
+            }
+            let home = normalizeLocal(homeDirectory).lowercased()
+            if !home.isEmpty && lowerSource == home {
+                return .refused("Backing up your whole home folder is not allowed. Pick a folder inside it.")
+            }
         }
 
         // Destination and removed-items folder.
@@ -139,6 +151,61 @@ public enum SafetyRules {
             let src = RcloneLocation(remote: "", path: source)
             if destination.isSameOrInside(src) || src.isSameOrInside(destination) {
                 return .refused("The destination can't be inside the folder being backed up.")
+            }
+        }
+        return .ok
+    }
+
+    /// "OneDrive:" and "onedrive" both become "onedrive", so a hand-written rule matches either way.
+    static func remoteKey(_ remote: String) -> String {
+        var r = remote.trimmingCharacters(in: .whitespaces).lowercased()
+        while r.hasSuffix(":") { r.removeLast() }
+        return r
+    }
+
+    /// Lower-cased private-path fragments that may not go to this job's remote.
+    static func privateRules(for job: SyncJob, config: KofferConfig) -> [String] {
+        let remote = remoteKey(job.remoteName)
+        if remote.isEmpty { return [] }
+        var result: [String] = []
+        for rule in config.privatePaths {
+            let f = rule.pathContains.trimmingCharacters(in: .whitespaces).lowercased()
+            if f.isEmpty { continue }
+            let forbidden: [String] = rule.forbiddenRemotes.map { remoteKey($0) }
+            if forbidden.contains(remote) { result.append(f) }
+        }
+        return result
+    }
+
+    /// Checks every file a dry run would send (new, replaced, moved) against the never-sync list and the
+    /// private folders. This catches a source that is a parent of a protected folder.
+    public static func checkItems(_ items: [ChangeItem], job: SyncJob, config: KofferConfig) -> SafetyVerdict {
+        var never: [String] = []
+        for fragment in config.neverSync {
+            let f = fragment.trimmingCharacters(in: .whitespaces).lowercased()
+            if !f.isEmpty { never.append(f) }
+        }
+        let privateFragments: [String] = privateRules(for: job, config: config)
+        if never.isEmpty && privateFragments.isEmpty { return .ok }
+
+        let source = normalizeLocal(job.source.trimmingCharacters(in: .whitespaces))
+        let resolved = normalizeLocal((source as NSString).resolvingSymlinksInPath)
+        var bases: [String] = [source.lowercased()]
+        if resolved != source { bases.append(resolved.lowercased()) }
+
+        for item in items where item.kind != .removed {
+            var paths: [String] = [item.path]
+            if let n = item.newPath { paths.append(n) }
+            for rel in paths {
+                for base in bases {
+                    let full = base + "/" + rel.lowercased()
+                    for f in never where full.contains(f) {
+                        return .refused("Nothing was sent: \(rel) is in a folder on the never-sync list (\(f)).")
+                    }
+                    for f in privateFragments where full.contains(f) {
+                        return .refused("Nothing was sent: \(rel) is in a private folder that may not go to \(job.remoteName).")
+                    }
+                }
             }
         }
         return .ok

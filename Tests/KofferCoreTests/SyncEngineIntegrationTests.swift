@@ -213,6 +213,25 @@ final class SyncEngineIntegrationTests: XCTestCase {
     }
 
     @MainActor
+    func testFolderInsideSourceOnNeverSyncListIsNotSent() async throws {
+        try write("A/photo.txt", "fine")
+        try write("Camera Stuff/raw.txt", "stays at home")
+        let engine = try await makeEngine(job: job())
+        // Hand-edited after launch: the engine must pick the new rule up before it runs.
+        let configURL = base.appendingPathComponent("config/config.json")
+        try ConfigStore(fileURL: configURL).save(KofferConfig(jobs: [job()], neverSync: ["camera stuff"]))
+
+        await runSync(engine)
+        guard case .needsAttention(let reason) = engine.status else {
+            return XCTFail("expected needsAttention, got \(engine.status)")
+        }
+        XCTAssertTrue(reason.contains("never-sync"), reason)
+        XCTAssertTrue(files(under: dst).isEmpty, "nothing was sent")
+        XCTAssertTrue(historyStore.records.isEmpty, "the real sync never ran")
+        XCTAssertEqual(engine.statusJobID, "archive")
+    }
+
+    @MainActor
     func testPreviewFillsPreviewAndChangesNothing() async throws {
         let n = try makeSourceFiles()
         let engine = try await makeEngine(job: job())

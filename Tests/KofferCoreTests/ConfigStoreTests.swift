@@ -69,6 +69,24 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertEqual(config.privatePaths, [])
     }
 
+    func testMisspeltKeyIsRefusedNotIgnored() throws {
+        let url = dir.appendingPathComponent("config.json")
+        let text = #"""
+        { "jobs": [], "privatepaths": [ { "pathContains": "Private Papers", "forbiddenRemotes": ["onedrive:"] } ] }
+        """#
+        try Data(text.utf8).write(to: url)
+        XCTAssertThrowsError(try ConfigStore(fileURL: url).load())
+        XCTAssertEqual(try Data(contentsOf: url), Data(text.utf8), "left untouched")
+
+        let badJob = #"{ "jobs": [ { "id": "a", "name": "A", "source": "/x/y", "destination": "onedrive:A", "removedRoot": "onedrive:_A", "enable": false } ] }"#
+        try Data(badJob.utf8).write(to: url)
+        XCTAssertThrowsError(try ConfigStore(fileURL: url).load())
+
+        let notes = #"{ "_note": "hello", "jobs": [], "neverSync": ["camera stuff"] }"#
+        try Data(notes.utf8).write(to: url)
+        XCTAssertEqual(try ConfigStore(fileURL: url).load().neverSync, ["camera stuff"])
+    }
+
     @MainActor
     func testEngineReportsUnreadableSettings() throws {
         let url = dir.appendingPathComponent("config.json")

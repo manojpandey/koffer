@@ -136,6 +136,62 @@ final class SafetyRulesTests: XCTestCase {
         assertRefused(SafetyRules.assertSafe(arguments: ["sync", "/a/b", "onedrive:Archive", "--backup-dir", "onedrive:Elsewhere"], removedRoot: root))
     }
 
+    func testDotPartsAreRefused() {
+        // rclone resolves "..", so this removed-items folder would really be the parent of the backup.
+        XCTAssertNil(RcloneLocation.parse("onedrive:Backup/_removed/.."))
+        XCTAssertNil(RcloneLocation.parse("onedrive:./Archive"))
+        XCTAssertEqual(RcloneLocation.parse("onedrive:Backup//Archive/"), RcloneLocation(remote: "onedrive:", path: "Backup/Archive"))
+        XCTAssertEqual(RcloneLocation.parse("onedrive:Archive..old"), RcloneLocation(remote: "onedrive:", path: "Archive..old"))
+        assertRefused(check(job(destination: "onedrive:Backup/Archive", removedRoot: "onedrive:Backup/_removed/..")))
+        assertRefused(check(job(destination: "onedrive:Backup/x/../Archive", removedRoot: "onedrive:Backup/_removed")))
+        assertRefused(SafetyRules.assertSafe(arguments: ["purge", "onedrive:Backup/_removed/.."],
+                                             removedRoot: "onedrive:Backup/_removed/.."))
+    }
+
+    func testForbiddenRemoteMatchesWithOrWithoutColon() {
+        let rule = PrivatePathRule(pathContains: "Private Papers", forbiddenRemotes: ["OneDrive"])
+        let config = KofferConfig(jobs: [], privatePaths: [rule])
+        assertRefused(check(job(source: "/Volumes/MyDisk/Private Papers"), config))
+    }
+
+    func testDryRunItemsInsideProtectedFolderAreRefused() {
+        let rule = PrivatePathRule(pathContains: "private papers", forbiddenRemotes: ["onedrive:"])
+        let config = KofferConfig(jobs: [], neverSync: ["camera stuff"], privatePaths: [rule])
+        let parent = job(source: "/Volumes/MyDisk/Stuff")
+        XCTAssertEqual(check(parent, config), .ok, "the parent itself is not protected")
+        let fine: [ChangeItem] = [ChangeItem(kind: .new, path: "A/photo.jpg"),
+                                  ChangeItem(kind: .removed, path: "Private Papers/old.pdf")]
+        XCTAssertEqual(SafetyRules.checkItems(fine, job: parent, config: config), .ok, "removals send nothing")
+        assertRefused(SafetyRules.checkItems([ChangeItem(kind: .new, path: "Private Papers/tax.pdf")], job: parent, config: config))
+        assertRefused(SafetyRules.checkItems([ChangeItem(kind: .replaced, path: "x/Camera Stuff/a.jpg")], job: parent, config: config))
+        assertRefused(SafetyRules.checkItems([ChangeItem(kind: .moved, path: "a.pdf", newPath: "Private Papers/a.pdf")],
+                                             job: parent, config: config))
+        // Private folders may still go to a remote that is not forbidden.
+        let other = job(source: "/Volumes/MyDisk/Stuff", destination: "gdrive:Stuff", removedRoot: "gdrive:_Stuff_removed")
+        XCTAssertEqual(SafetyRules.checkItems([ChangeItem(kind: .new, path: "Private Papers/tax.pdf")], job: other,
+                                              config: KofferConfig(jobs: [], privatePaths: [rule])), .ok)
+    }
+
+    func testSymlinkedSourceIsCheckedWhereItPoints() throws {
+        let dir = try makeTempDirectory("koffer-safety")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = dir.appendingPathComponent("Private Papers", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true, attributes: nil)
+        let link = dir.appendingPathComponent("innocent").path
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: target.path)
+        let rule = PrivatePathRule(pathContains: "private papers", forbiddenRemotes: ["onedrive:"])
+        let config = KofferConfig(jobs: [], privatePaths: [rule])
+        assertRefused(check(job(source: link), config))
+    }
+
+    func testMassRemovalHeuristic() {
+        XCTAssertFalse(SyncEngine.looksLikeMassRemoval(removed: 0, checked: 0))
+        XCTAssertFalse(SyncEngine.looksLikeMassRemoval(removed: 3, checked: 3), "tiny folders are left alone")
+        XCTAssertFalse(SyncEngine.looksLikeMassRemoval(removed: 30, checked: 10_000))
+        XCTAssertTrue(SyncEngine.looksLikeMassRemoval(removed: 30, checked: 40))
+        XCTAssertTrue(SyncEngine.looksLikeMassRemoval(removed: 500, checked: 1_000_000))
+    }
+
     func testLocationParsing() {
         XCTAssertEqual(RcloneLocation.parse("onedrive:Archive/"), RcloneLocation(remote: "onedrive:", path: "Archive"))
         XCTAssertEqual(RcloneLocation.parse("/tmp/a/"), RcloneLocation(remote: "", path: "/tmp/a"))

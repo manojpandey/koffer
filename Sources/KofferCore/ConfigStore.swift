@@ -63,6 +63,10 @@ public final class ConfigStore {
         } catch {
             throw ConfigStoreError.unreadable("The settings file is not valid: \(error.localizedDescription)")
         }
+        // A misspelt key ("privatepaths") would otherwise be ignored and silently drop a protection.
+        if let unknown = ConfigStore.unknownKey(in: data) {
+            throw ConfigStoreError.unreadable("The settings file has a setting Koffer doesn't know: \"\(unknown)\". Keys starting with _ are fine for notes.")
+        }
         let jobs: [SyncJob] = (raw.jobs ?? []).map { (j: LenientJob) -> SyncJob in
             SyncJob(id: j.id, name: j.name, source: j.source, destination: j.destination,
                     removedRoot: j.removedRoot, requiredVolume: j.requiredVolume,
@@ -74,6 +78,38 @@ public final class ConfigStore {
             PrivatePathRule(pathContains: r.pathContains, forbiddenRemotes: r.forbiddenRemotes ?? [])
         }
         return KofferConfig(jobs: jobs, neverSync: raw.neverSync ?? [], privatePaths: rules)
+    }
+}
+
+extension ConfigStore {
+    static let configKeys: Set<String> = ["jobs", "neverSync", "privatePaths"]
+    static let jobKeys: Set<String> = ["id", "name", "source", "destination", "removedRoot", "requiredVolume",
+                                       "autoSyncOnMount", "enabled", "previewApproved", "extraLogDirectory", "isTest"]
+    static let ruleKeys: Set<String> = ["pathContains", "forbiddenRemotes"]
+
+    /// The first key the settings file uses that Koffer does not know (keys starting with "_" are notes).
+    static func unknownKey(in data: Data) -> String? {
+        let parsed: Any? = try? JSONSerialization.jsonObject(with: data, options: [])
+        guard let top = parsed as? [String: Any] else { return nil }
+        if let bad = firstUnknown(top, allowed: configKeys) { return bad }
+        if let jobs = top["jobs"] as? [Any] {
+            for entry in jobs {
+                if let dict = entry as? [String: Any], let bad = firstUnknown(dict, allowed: jobKeys) { return bad }
+            }
+        }
+        if let rules = top["privatePaths"] as? [Any] {
+            for entry in rules {
+                if let dict = entry as? [String: Any], let bad = firstUnknown(dict, allowed: ruleKeys) { return bad }
+            }
+        }
+        return nil
+    }
+
+    private static func firstUnknown(_ dict: [String: Any], allowed: Set<String>) -> String? {
+        for key in dict.keys.sorted() where !allowed.contains(key) && !key.hasPrefix("_") {
+            return key
+        }
+        return nil
     }
 }
 

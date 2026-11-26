@@ -76,6 +76,9 @@ public final class SyncEngine: ObservableObject {
     @Published public private(set) var rclonePath: String? = nil
     @Published public private(set) var needsReconnect: Bool = false
     @Published public private(set) var mountedVolumes: Set<String> = []
+    /// The job the current `status` is about (nil = not tied to one job, e.g. unreadable settings).
+    /// Lets the UI avoid showing one job's "done" or problem on another job.
+    @Published public private(set) var statusJobID: String? = nil
 
     public let environment: EngineEnvironment
     private let services: EngineServices
@@ -164,18 +167,27 @@ public final class SyncEngine: ObservableObject {
     // MARK: - Running
 
     public func syncNow(jobID: String) {
-        guard !working, !status.isBusy, let job = self.job(id: jobID) else { return }
+        startSync(jobID: jobID, automatic: false)
+    }
+
+    /// `automatic` is true for runs Koffer starts on its own (disk plugged in); those get extra caution.
+    private func startSync(jobID: String, automatic: Bool) {
+        guard !working, !status.isBusy else { return }
+        reloadConfig()
+        guard let job = self.job(id: jobID) else { return }
         beginWork(job: job)
         currentTask = Task { [weak self] in
             guard let self = self else { return }
-            let ran: Bool = await self.performSync(job: job)
+            let ran: Bool = await self.performSync(job: job, automatic: automatic)
             self.finishWork()
             if ran { self.refreshRemovedSize(jobID: job.id) }
         }
     }
 
     public func previewChanges(jobID: String) {
-        guard !working, !status.isBusy, let job = self.job(id: jobID) else { return }
+        guard !working, !status.isBusy else { return }
+        reloadConfig()
+        guard let job = self.job(id: jobID) else { return }
         beginWork(job: job)
         currentTask = Task { [weak self] in
             guard let self = self else { return }
@@ -279,6 +291,7 @@ public final class SyncEngine: ObservableObject {
             return
         }
         let previous: EngineStatus = status
+        let previousJobID: String? = statusJobID
         beginWork(job: job)
         status = .preparing("Emptying removed items")
         currentTask = Task { [weak self] in
@@ -291,8 +304,10 @@ public final class SyncEngine: ObservableObject {
             if result.status == 0 || result.status == 3 {
                 self.removedBytes[jobID] = 0
                 self.status = previous
+                self.statusJobID = previousJobID
             } else if self.stopReason != nil {
                 self.status = previous
+                self.statusJobID = previousJobID
             } else {
                 let lines: [String] = result.stderr.split(separator: "\n").map(String.init)
                 let c = ErrorClassifier.classify(exitCode: result.status, errorLines: lines)
@@ -325,7 +340,7 @@ public final class SyncEngine: ObservableObject {
     // MARK: - Sync flow
 
     /// Returns true when the real sync ran (so the removed size may have changed).
-    private func performSync(job: SyncJob) async -> Bool {
+    private func performSync(job: SyncJob, automatic: Bool) async -> Bool {
         await stopHelper()
         let startedAt: Date = environment.now()
 
@@ -352,7 +367,19 @@ public final class SyncEngine: ObservableObject {
             return false
         }
         let items: [ChangeItem] = dryParser.changeItems
+        // A source that is a parent of a private or never-sync folder: refuse before anything is sent.
+        if case .refused(let reason) = SafetyRules.checkItems(items, job: job, config: config) {
+            finishEarly(job: job, outcome: Outcome(status: .needsAttention(reason), run: .failed, message: reason), notify: true)
+            return false
+        }
         preview = PreviewResult(jobID: job.id, date: environment.now(), items: items)
+        // Unattended runs stop when most of the cloud copy would be moved away (wrong disk, half-copied folder).
+        let removedCount: Int = items.filter { $0.kind == .removed }.count
+        if automatic && SyncEngine.looksLikeMassRemoval(removed: removedCount, checked: dryParser.progress.checksTotal) {
+            let message = "This backup would remove \(Format.count(removedCount)) files from the cloud copy, so Koffer didn't start it on its own. Check the disk and \"What will change?\", then press \"Back up now\" if that's right."
+            finishEarly(job: job, outcome: Outcome(status: .needsAttention(message), run: .failed, message: message), notify: true)
+            return false
+        }
         let uploadBytes: Int64 = dryParser.dryRunUploadBytes
         let uploadFiles: Int = items.filter { $0.kind == .new || $0.kind == .replaced }.count
 
@@ -384,6 +411,18 @@ public final class SyncEngine: ObservableObject {
         }
         if stopReason != nil {
             finishEarly(job: job, outcome: outcome(exit: 0, parser: RcloneLogParser(), job: job), notify: true)
+            return false
+        }
+
+        // The dry run can take a long time: make sure the disk is still there and the folder is not empty
+        // right before the real sync (an empty source would move the whole cloud copy to removed items).
+        if let volume = job.requiredVolume, !mountedVolumes.contains(volume) {
+            let message = SyncEngine.unpluggedMessage
+            finishEarly(job: job, outcome: Outcome(status: .paused(message), run: .paused, message: message), notify: true)
+            return false
+        }
+        if case .refused(let reason) = Preflight.checkSource(job.source) {
+            finishEarly(job: job, outcome: Outcome(status: .needsAttention(reason), run: .failed, message: reason), notify: true)
             return false
         }
 
@@ -447,6 +486,10 @@ public final class SyncEngine: ObservableObject {
         let exitCode: Int32 = await runRclone(rclone, args, parser: parser, logHandles: [], live: false)
         if stopReason != nil || exitCode != 0 {
             status = outcome(exit: exitCode, parser: parser, job: job).status
+            return
+        }
+        if case .refused(let reason) = SafetyRules.checkItems(parser.changeItems, job: job, config: config) {
+            status = .needsAttention(reason)
             return
         }
         preview = PreviewResult(jobID: job.id, date: environment.now(), items: parser.changeItems)
@@ -527,6 +570,13 @@ public final class SyncEngine: ObservableObject {
         }
         if exit == 0 {
             needsReconnect = false
+            // rclone normally exits non-zero after errors; never call a run with errors "done".
+            let errors: Int = parser.progress.errors
+            if errors > 0 {
+                let files: String = errors == 1 ? "1 file" : "\(Format.count(errors)) files"
+                let message = "The backup finished, but \(files) couldn't be sent. The log has the details."
+                return Outcome(status: .needsAttention(message), run: .completed, message: message)
+            }
             return Outcome(status: .done, run: .completed, message: nil)
         }
         var lines: [String] = parser.errorLines
@@ -605,6 +655,7 @@ public final class SyncEngine: ObservableObject {
         working = true
         runningJob = job
         activeJobID = job.id
+        statusJobID = job.id
         stopReason = nil
     }
 
@@ -642,12 +693,39 @@ public final class SyncEngine: ObservableObject {
 
     private func autoStart(volume: String) {
         guard !working, !status.isBusy, !configBroken, mountedVolumes.contains(volume) else { return }
+        reloadConfig()
+        guard !configBroken else { return }
         guard let job = jobs.first(where: { isAutoEligible($0) && $0.requiredVolume == volume }) else { return }
         if !isOnline && needsNetwork(job) {
             pausedOfflineJobID = job.id
             return
         }
-        syncNow(jobID: job.id)
+        startSync(jobID: job.id, automatic: true)
+    }
+
+    /// True when an unattended run would move a large share of the cloud copy into removed items.
+    /// `checked` is the dry run's `totalChecks`.
+    nonisolated static func looksLikeMassRemoval(removed: Int, checked: Int) -> Bool {
+        if removed >= 500 { return true }
+        return removed >= 20 && removed * 2 >= checked
+    }
+
+    /// Picks up hand edits (a job switched off, a new private folder) before anything runs.
+    /// A missing file keeps what is in memory; an unreadable one stops everything, as at launch.
+    private func reloadConfig() {
+        guard !configBroken else { return }
+        guard FileManager.default.fileExists(atPath: configStore.fileURL.path) else { return }
+        do {
+            let fresh: KofferConfig = try configStore.load()
+            config = fresh
+            if jobs != fresh.jobs { jobs = fresh.jobs }
+        } catch {
+            configBroken = true
+            if !working {
+                status = .needsAttention(SyncEngine.settingsUnreadableMessage)
+                statusJobID = nil
+            }
+        }
     }
 
     /// Re-reads the file (so hand edits are not lost), applies the change and saves.
@@ -659,7 +737,10 @@ public final class SyncEngine: ObservableObject {
                 fresh = try configStore.load()
             } catch {
                 configBroken = true
-                if !working { status = .needsAttention(SyncEngine.settingsUnreadableMessage) }
+                if !working {
+                    status = .needsAttention(SyncEngine.settingsUnreadableMessage)
+                    statusJobID = nil
+                }
                 return
             }
         }
