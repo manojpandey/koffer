@@ -134,7 +134,7 @@ final class SyncEngineIntegrationTests: XCTestCase {
         // The log file exists and holds rclone's JSON lines; a copy lands in the extra folder.
         let logPath = try XCTUnwrap(engine.history.first?.logPath)
         let logText = try String(contentsOfFile: logPath, encoding: .utf8)
-        XCTAssertTrue(logText.contains("Copied (new)"))
+        XCTAssertTrue(logText.contains("Copied ("), "log should hold rclone's per-file lines")
         XCTAssertTrue(URL(fileURLWithPath: logPath).lastPathComponent.hasPrefix("archive_"))
         XCTAssertTrue(fm.fileExists(atPath: base.appendingPathComponent("extra-logs")
             .appendingPathComponent(URL(fileURLWithPath: logPath).lastPathComponent).path))

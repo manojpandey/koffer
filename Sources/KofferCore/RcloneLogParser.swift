@@ -156,14 +156,10 @@ public final class RcloneLogParser {
 
         // Per-file lines of a real run.
         if let path = object {
-            if msg == "Copied (new)" {
+            // "Copied (new)", "Copied (replaced existing)", and on some backends "Copied (server-side copy)".
+            if msg.hasPrefix("Copied (") {
                 uploadEvents += 1
-                events.append(.uploaded(path: path, replaced: false, size: size))
-                return events
-            }
-            if msg == "Copied (replaced existing)" {
-                uploadEvents += 1
-                events.append(.uploaded(path: path, replaced: true, size: size))
+                events.append(.uploaded(path: path, replaced: msg.contains("replaced"), size: size))
                 return events
             }
             if msg.hasPrefix("Moved (server-side) to: ") {
