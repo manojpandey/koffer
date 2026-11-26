@@ -1,10 +1,9 @@
 import SwiftUI
 
-/// One place for Koffer's look: spacing, radii, neutrals and the single "golden hour" accent.
+/// One place for Koffer's look: spacing, radii and a monochrome palette.
 ///
-/// The gradient is the only accent in the app. It is used in exactly three places:
-/// the progress ring, the soft glow behind it, and the primary button. Everything else
-/// stays in quiet, semantic neutrals so the gradient always means "this is the backup".
+/// Everything is drawn in the system label colour at different opacities, so the panel follows
+/// light and dark mode exactly and stays calm. No gradients.
 enum Theme {
 
     // MARK: Layout
@@ -30,7 +29,7 @@ enum Theme {
 
     enum Ring {
         static let diameter: CGFloat = 96
-        static let lineWidth: CGFloat = 9
+        static let lineWidth: CGFloat = 6
     }
 
     // MARK: Neutrals
@@ -42,60 +41,35 @@ enum Theme {
     static let hairline: Color = Color.primary.opacity(0.08)
 
     // Status colours are always paired with a distinct symbol, never used alone.
-    static let success: Color = Color.green
+    static let success: Color = Color.primary
     static let warning: Color = Color.orange
     static let failure: Color = Color.red
 
-    // MARK: Golden hour
+    // MARK: Ink (monochrome)
 
-    /// Amber -> coral -> rose -> a touch of violet. Slightly desaturated in dark mode.
-    static func golden(_ scheme: ColorScheme) -> [Color] {
-        if scheme == .dark {
-            return [
-                Color(red: 0.93, green: 0.69, blue: 0.38),
-                Color(red: 0.92, green: 0.51, blue: 0.41),
-                Color(red: 0.86, green: 0.41, blue: 0.53),
-                Color(red: 0.62, green: 0.49, blue: 0.90),
-            ]
-        }
-        return [
-            Color(red: 1.00, green: 0.70, blue: 0.28),
-            Color(red: 1.00, green: 0.48, blue: 0.35),
-            Color(red: 0.95, green: 0.33, blue: 0.49),
-            Color(red: 0.61, green: 0.42, blue: 1.00),
-        ]
+    /// The single "accent" is the system label colour: near-black in light mode, near-white in dark.
+    /// No hues, no gradients. Colour appears only for warnings and failures.
+    static let ink: Color = Color.primary
+
+    /// Text and glyphs drawn on top of `ink`.
+    static func onInk(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color.black : Color.white
     }
+
+    // The functions below keep their old names so views did not have to change; they are all solid ink now.
+    static func golden(_ scheme: ColorScheme) -> [Color] { [ink, ink] }
 
     static func goldenLinear(_ scheme: ColorScheme) -> LinearGradient {
-        LinearGradient(gradient: Gradient(colors: golden(scheme)),
-                       startPoint: .topLeading, endPoint: .bottomTrailing)
+        LinearGradient(gradient: Gradient(colors: golden(scheme)), startPoint: .leading, endPoint: .trailing)
     }
 
-    /// Deeper stops of the same blend, so white text and glyphs on it stay above 4.5:1.
-    static func deep(_ scheme: ColorScheme) -> [Color] {
-        if scheme == .dark {
-            return [
-                Color(red: 0.76, green: 0.32, blue: 0.22),
-                Color(red: 0.71, green: 0.24, blue: 0.40),
-                Color(red: 0.48, green: 0.31, blue: 0.76),
-            ]
-        }
-        return [
-            Color(red: 0.80, green: 0.30, blue: 0.18),
-            Color(red: 0.76, green: 0.20, blue: 0.40),
-            Color(red: 0.50, green: 0.28, blue: 0.80),
-        ]
-    }
+    static func deep(_ scheme: ColorScheme) -> [Color] { [ink, ink, ink] }
 
     static func deepLinear(_ scheme: ColorScheme) -> LinearGradient {
-        LinearGradient(gradient: Gradient(colors: deep(scheme)),
-                       startPoint: .leading, endPoint: .trailing)
+        LinearGradient(gradient: Gradient(colors: deep(scheme)), startPoint: .leading, endPoint: .trailing)
     }
 
-    static func glowColors(_ scheme: ColorScheme) -> [Color] {
-        let base: [Color] = golden(scheme)
-        return base + [base[0]]   // closes the loop so a rotating angular gradient has no seam
-    }
+    static func glowColors(_ scheme: ColorScheme) -> [Color] { [Color.clear, Color.clear] }
 }
 
 // MARK: - Small shared building blocks

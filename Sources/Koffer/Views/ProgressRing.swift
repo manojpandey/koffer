@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import KofferCore
 
 /// The progress ring: a neutral track, a golden-hour arc with round caps, and a calm centre.
@@ -135,7 +136,7 @@ private struct RingCenter: View {
         case .done:
             Image(systemName: "checkmark")
                 .font(.system(size: 32, weight: .semibold))
-                .foregroundStyle(Color.white)
+                .foregroundStyle(Color(nsColor: NSColor.windowBackgroundColor))
         case .working:
             glyph("suitcase.fill", .secondary)
         case .paused:

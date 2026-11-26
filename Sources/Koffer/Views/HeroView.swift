@@ -43,7 +43,7 @@ struct HeroGlow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: !isMoving)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: true)) { context in
             glow(angle: angle(at: context.date))
         }
         .animation(reduceMotion ? nil : Animation.easeInOut(duration: 0.8), value: intensity)
@@ -58,13 +58,9 @@ struct HeroGlow: View {
         return (date.timeIntervalSinceReferenceDate * 14.0).truncatingRemainder(dividingBy: 360.0)
     }
 
+    /// The coloured glow is gone (monochrome design); this keeps the layout slot without drawing anything.
     private func glow(angle: Double) -> some View {
-        Circle()
-            .fill(AngularGradient(gradient: Gradient(colors: Theme.glowColors(scheme)),
-                                  center: .center, angle: .degrees(angle)))
-            .frame(width: 130, height: 130)
-            .blur(radius: 34)
-            .opacity(intensity)
+        Color.clear.frame(width: 130, height: 130)
     }
 }
 

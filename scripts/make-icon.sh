@@ -28,10 +28,10 @@ image.lockFocus()
 let rect = NSRect(x: 0, y: 0, width: size, height: size).insetBy(dx: 80, dy: 80)
 let path = NSBezierPath(roundedRect: rect, xRadius: 185, yRadius: 185)
 let gradient = NSGradient(colors: [
-    NSColor(calibratedRed: 1.00, green: 0.75, blue: 0.25, alpha: 1),
-    NSColor(calibratedRed: 1.00, green: 0.45, blue: 0.35, alpha: 1),
-    NSColor(calibratedRed: 0.92, green: 0.30, blue: 0.50, alpha: 1),
-    NSColor(calibratedRed: 0.50, green: 0.32, blue: 0.85, alpha: 1),
+    NSColor(calibratedWhite: 0.16, alpha: 1),
+    NSColor(calibratedWhite: 0.13, alpha: 1),
+    NSColor(calibratedWhite: 0.11, alpha: 1),
+    NSColor(calibratedWhite: 0.09, alpha: 1),
 ])
 gradient?.draw(in: path, angle: -60)
 
