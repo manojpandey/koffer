@@ -24,6 +24,13 @@ struct MenuBarState: Equatable {
     var accessibility: String
 }
 
+/// What happened after "Delete from this disk…", shown once the decision card is gone.
+struct CloudDeletionNote: Equatable {
+    var jobID: String
+    var text: String
+    var isError: Bool
+}
+
 /// New / moved / removed / errors for the current run (live) or the last finished one.
 struct RunNumbers: Equatable {
     var uploaded: Int
@@ -73,6 +80,18 @@ final class AppModel: ObservableObject {
     @Published var showAllHistory: Bool = false
     /// ChangeKind raw values whose preview group is expanded.
     @Published var expandedKinds: Set<String> = []
+
+    // Deleted in the cloud (v0.3).
+    /// The "Move N files to the Trash?" confirmation.
+    @Published var confirmCloudDelete: Bool = false
+    /// The list of paths in the "Deleted in …" card.
+    @Published var cloudDeletionsExpanded: Bool = false
+    /// The "Deleted in the cloud" group in the preview.
+    @Published var previewCloudDeletedExpanded: Bool = false
+    /// True while files are checked again and moved to the Trash.
+    @Published private(set) var isApplyingCloudDeletions: Bool = false
+    /// Result or error of the last "Delete from this disk…".
+    @Published var cloudDeletionNote: CloudDeletionNote? = nil
 
     // MARK: Init
 
@@ -143,6 +162,8 @@ final class AppModel: ObservableObject {
         expandedKinds = []
         showAllHistory = false
         forgetRefusal = nil
+        cloudDeletionsExpanded = false
+        previewCloudDeletedExpanded = false
         if showSettings { refreshRemovedSize(for: job) }
     }
 
@@ -293,6 +314,10 @@ final class AppModel: ObservableObject {
         if let volume = job.requiredVolume, !engine.mountedVolumes.contains(volume) {
             return .waitingForDisk(volume)
         }
+        // Files deleted in the cloud wait for a decision, even after "Decide later".
+        if engine.cloudDeletions[job.id] != nil {
+            return .attention(SyncEngine.cloudDeletionsMessage(job: job))
+        }
         if statusIsAbout(job) {
             switch status {
             case .paused(let why): return .paused(why)
@@ -335,8 +360,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The reason for the generic "Needs a look" card. Nil for the cloud-deletion message: that has its own card.
     func attentionReason(for job: SyncJob) -> String? {
-        if case .attention(let reason) = phase(for: job) { return reason }
+        if case .attention(let reason) = phase(for: job) {
+            if engine.cloudDeletions[job.id] != nil && reason == SyncEngine.cloudDeletionsMessage(job: job) { return nil }
+            return reason
+        }
         return nil
     }
 
@@ -347,6 +376,75 @@ final class AppModel: ObservableObject {
     func hasAttention(for job: SyncJob) -> Bool {
         engine.rclonePath == nil || engine.needsReconnect
             || attentionReason(for: job) != nil || showsFirstRunNote(for: job)
+            || cloudDeletionReport(for: job) != nil || noteAboutCloudDeletions(for: job) != nil
+    }
+
+    // MARK: Deleted in the cloud
+
+    func cloudDeletionReport(for job: SyncJob) -> CloudDeletionReport? {
+        engine.cloudDeletions[job.id]
+    }
+
+    func noteAboutCloudDeletions(for job: SyncJob) -> CloudDeletionNote? {
+        guard let note = cloudDeletionNote, note.jobID == job.id else { return nil }
+        return note
+    }
+
+    /// Where the files would go to the Trash from: the job's disk, or "this Mac".
+    func diskName(for job: SyncJob) -> String {
+        if let volume = job.requiredVolume, !volume.isEmpty { return volume }
+        let parts: [String] = job.source.split(separator: "/").map { String($0) }
+        if parts.count >= 2 && parts[0] == "Volumes" && !parts[1].isEmpty { return parts[1] }
+        return "this Mac"
+    }
+
+    /// "Delete from this disk…" after the confirmation: moves the files to the Trash, then backs up.
+    func applyCloudDeletions(for job: SyncJob) {
+        guard !isApplyingCloudDeletions, let report = engine.cloudDeletions[job.id] else { return }
+        let expected: Int = report.items.count
+        let jobID: String = job.id
+        isApplyingCloudDeletions = true
+        cloudDeletionNote = nil
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            let result: Result<Int, EngineError> = await self.engine.applyCloudDeletions(jobID: jobID)
+            self.isApplyingCloudDeletions = false
+            switch result {
+            case .success(let moved):
+                self.cloudDeletionNote = CloudDeletionNote(jobID: jobID, text: AppModel.trashSummary(moved: moved, expected: expected),
+                                                           isError: false)
+            case .failure(let error):
+                self.cloudDeletionNote = CloudDeletionNote(jobID: jobID, text: error.message, isError: true)
+            }
+        }
+    }
+
+    /// "Put them back in …".
+    func restoreCloudDeletions(for job: SyncJob) {
+        cloudDeletionNote = nil
+        engine.keepLocalAndRestoreCloud(jobID: job.id)
+    }
+
+    /// "Decide later".
+    func decideCloudDeletionsLater(for job: SyncJob) {
+        cloudDeletionNote = nil
+        cloudDeletionsExpanded = false
+        engine.dismissCloudDeletions(jobID: job.id)
+    }
+
+    func dismissCloudDeletionNote() {
+        cloudDeletionNote = nil
+    }
+
+    static func trashSummary(moved: Int, expected: Int) -> String {
+        let files: String = moved == 1 ? "1 file" : "\(Format.count(moved)) files"
+        var text: String = "Moved \(files) to the Trash. You can restore them from there."
+        if moved < expected {
+            let rest: Int = expected - moved
+            let others: String = rest == 1 ? "1 other file" : "\(Format.count(rest)) other files"
+            text += " \(others) changed or came back in the meantime, so they stay and are backed up again."
+        }
+        return text
     }
 
     func numbers(for job: SyncJob) -> RunNumbers? {

@@ -13,6 +13,11 @@ struct AttentionStack: View {
             } else if model.engine.needsReconnect {
                 ReconnectCard(job: job)
             }
+            if let report = model.cloudDeletionReport(for: job) {
+                CloudDeletionCard(job: job, report: report)
+            } else if let note = model.noteAboutCloudDeletions(for: job) {
+                CloudDeletionNoteCard(note: note)
+            }
             if let reason = model.attentionReason(for: job) {
                 AttentionCard(symbol: "exclamationmark.triangle.fill", tint: Theme.warning,
                               title: "Needs a look", message: reason) {
@@ -209,6 +214,141 @@ struct LastLogButton: View {
     var body: some View {
         if let path = model.lastRecord(for: job)?.logPath {
             Button("Show log") { model.revealLog(path) }
+                .buttonStyle(QuietButtonStyle(compact: true))
+        }
+    }
+}
+
+// MARK: - Deleted in the cloud (v0.3)
+
+/// Files deleted in the cloud copy that are still on this disk. Nothing happens to them until the owner picks
+/// one of the three buttons; until then Koffer doesn't back this folder up on its own.
+struct CloudDeletionCard: View {
+    @EnvironmentObject var model: AppModel
+    let job: SyncJob
+    let report: CloudDeletionReport
+
+    var body: some View {
+        AttentionCard(symbol: "icloud.slash", tint: Theme.warning, title: "Deleted in \(cloudName)",
+                      message: sentence) {
+            VStack(alignment: .leading, spacing: Theme.Space.s) {
+                DisclosureGroup(isExpanded: $model.cloudDeletionsExpanded) {
+                    ChangeList(kind: .removed, items: report.items)
+                } label: {
+                    Text(listLabel)
+                        .font(.system(size: 12, weight: .medium))
+                }
+                if report.extrasCount > 0 {
+                    Text(extrasNote)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if report.looksLikeMassRemoval {
+                    Text(massNote)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let note = model.noteAboutCloudDeletions(for: job) {
+                    if note.isError {
+                        TaskFailureText(message: note.text)
+                    } else {
+                        Text(note.text)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                if model.isApplyingCloudDeletions {
+                    TaskProgressLine(message: "Moving files to the Trash\u{2026}")
+                } else {
+                    CloudDeletionButtons(job: job, report: report, cloudName: cloudName)
+                }
+            }
+        }
+        .confirmationDialog(confirmTitle, isPresented: $model.confirmCloudDelete, titleVisibility: .visible) {
+            Button("Move to Trash", role: .destructive) { model.applyCloudDeletions(for: job) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You can restore them from the Trash.")
+        }
+    }
+
+    private var cloudName: String {
+        if job.remoteName.isEmpty { return SyncEngine.cloudDisplayName(job) }
+        return model.cloudName(for: job)
+    }
+
+    private var listLabel: String {
+        report.items.count == 1 ? "Show the file" : "Show the \(Format.count(report.items.count)) files"
+    }
+
+    private var filesText: String {
+        report.items.count == 1 ? "1 file" : "\(Format.count(report.items.count)) files"
+    }
+
+    private var sentence: String {
+        let verb: String = report.items.count == 1 ? "was" : "were"
+        return "\(filesText) (\(Format.bytes(report.totalBytes))) \(verb) deleted in \(cloudName) since the last backup. "
+            + "They\u{2019}re still on this disk."
+    }
+
+    private var extrasNote: String {
+        let files: String = report.extrasCount == 1 ? "1 file was" : "\(Format.count(report.extrasCount)) files were"
+        return "\(files) also added or renamed in \(cloudName). The next backup gives renamed files their old name back "
+            + "and moves new ones to \(model.removedFolderName(for: job))."
+    }
+
+    private var massNote: String {
+        "That\u{2019}s a large part of this backup. If the folder was moved or deleted in \(cloudName) by mistake, "
+            + "put them back. To delete this many files, delete them on this disk directly."
+    }
+
+    private var confirmTitle: String {
+        "Move \(filesText) to the Trash on \(model.diskName(for: job))?"
+    }
+}
+
+private struct CloudDeletionButtons: View {
+    @EnvironmentObject var model: AppModel
+    let job: SyncJob
+    let report: CloudDeletionReport
+    let cloudName: String
+
+    var body: some View {
+        let busy: Bool = model.engine.status.isBusy
+        VStack(alignment: .leading, spacing: Theme.Space.s) {
+            if !report.looksLikeMassRemoval {
+                Button("Delete from this disk\u{2026}") { model.confirmCloudDelete = true }
+                    .buttonStyle(QuietButtonStyle(compact: true))
+                    .disabled(busy || !model.canRun(job))
+                    .help("Moves these files to the Trash, after checking each one again.")
+            }
+            Button("Put them back in \(cloudName)") { model.restoreCloudDeletions(for: job) }
+                .buttonStyle(QuietButtonStyle(compact: true))
+                .disabled(busy || !model.canRun(job))
+                .help("Backs up now and uploads these files again.")
+            Button("Decide later") { model.decideCloudDeletionsLater(for: job) }
+                .buttonStyle(QuietButtonStyle(compact: true))
+                .disabled(busy)
+                .help("Koffer won't back this folder up on its own until you choose.")
+        }
+        .padding(.top, 2)
+    }
+}
+
+/// What "Delete from this disk…" did, once the decision card is gone.
+struct CloudDeletionNoteCard: View {
+    @EnvironmentObject var model: AppModel
+    let note: CloudDeletionNote
+
+    var body: some View {
+        AttentionCard(symbol: note.isError ? "exclamationmark.triangle.fill" : "trash",
+                      tint: note.isError ? Theme.warning : Color.secondary,
+                      title: note.isError ? "Couldn\u{2019}t finish" : "Moved to the Trash",
+                      message: note.text) {
+            Button("OK") { model.dismissCloudDeletionNote() }
                 .buttonStyle(QuietButtonStyle(compact: true))
         }
     }

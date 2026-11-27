@@ -21,6 +21,9 @@ struct PreviewSection: View {
             if !preview.isEmpty {
                 PreviewGroups(preview: preview)
             }
+            if !preview.cloudDeleted.isEmpty {
+                CloudDeletedGroup(items: preview.cloudDeleted)
+            }
         }
         .quietCard()
     }
@@ -66,6 +69,22 @@ private struct PreviewGroups: View {
                 if on { _ = model.expandedKinds.insert(key) } else { _ = model.expandedKinds.remove(key) }
             }
         )
+    }
+}
+
+/// v0.3: files deleted in the cloud since the last backup that are still on this disk.
+private struct CloudDeletedGroup: View {
+    @EnvironmentObject var model: AppModel
+    let items: [ChangeItem]
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $model.previewCloudDeletedExpanded) {
+            ChangeList(kind: .removed, items: items)
+        } label: {
+            Text("Deleted in the cloud: \(Format.count(items.count)) (they will be put back unless you choose otherwise)")
+                .font(.system(size: 12, weight: .medium))
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 

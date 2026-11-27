@@ -36,6 +36,12 @@ final class Notifier: NSObject, Notifying, UNUserNotificationCenterDelegate {
         post(title: "Backup needs attention", body: reason)
     }
 
+    func cloudDeletionsFound(job: SyncJob, count: Int) {
+        let files: String = count == 1 ? "1 file was" : "\(Format.count(count)) files were"
+        post(title: "Files deleted in the cloud",
+             body: "\(files) deleted from \(job.name) in the cloud. Open Koffer to choose what happens on this disk.")
+    }
+
     // MARK: Delegate
 
     func userNotificationCenter(_ center: UNUserNotificationCenter,

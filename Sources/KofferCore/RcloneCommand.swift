@@ -69,6 +69,18 @@ public enum RcloneCommand {
         return ["lsjson", target, "--dirs-only", "--no-mimetype", "--no-modtime"]
     }
 
+    /// `rclone lsjson <target> -R --files-only --no-mimetype --no-modtime` plus the sync's excludes:
+    /// every file in the backup with its path and size (v0.3 "deleted in the cloud"). Read-only.
+    /// Exit 3 with "directory not found" when the folder itself is gone.
+    public static func listFiles(target: String) -> [String] {
+        var args: [String] = ["lsjson", target, "-R", "--files-only", "--no-mimetype", "--no-modtime"]
+        for pattern in excludes {
+            args.append("--exclude")
+            args.append(pattern)
+        }
+        return args
+    }
+
     /// `rclone mkdir <target>`
     public static func mkdir(target: String) -> [String] {
         return ["mkdir", target]

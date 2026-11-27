@@ -237,3 +237,78 @@ No `@State`, `@Binding`, `@AppStorage`, `@FocusState` anywhere (see ground rules
      then select the new job in the panel and offer "What will change?".
 - Settings for a job gains "Forget this backup…" (confirmation; says nothing in the cloud is deleted) for non-built-in jobs.
 - Reconnect card uses engine.reconnect / reconnectState instead of Terminal. `TerminalLauncher` is no longer used by the UI.
+
+---
+
+# v0.3: deleted in the cloud
+
+Product rule: the disk stays the master, but a file the owner deletes in the cloud copy is not silently uploaded again.
+Koffer notices, asks, and only touches the disk after an explicit choice, and then only by moving files to the Trash.
+
+## Engine additions (Module A)
+
+```swift
+public struct CloudDeletionReport: Equatable {
+    public let jobID: String
+    public let detectedAt: Date
+    public let items: [ChangeItem]          // kind .removed, path relative to job.source, size
+    public let totalBytes: Int64
+    public let extrasCount: Int             // in the cloud, not in the manifest, not on the disk (added/renamed there)
+    public let looksLikeMassRemoval: Bool   // >= 500 files, or >= 50 files that are >= 25 % of the manifest
+}
+
+extension SyncEngine {
+    @Published public private(set) var cloudDeletions: [String: CloudDeletionReport]   // job id -> pending report
+
+    public func keepLocalAndRestoreCloud(jobID: String)                            // clear report, back up once without the check
+    public func applyCloudDeletions(jobID: String) async -> Result<Int, EngineError> // re-verify, move to Trash, back up
+    public func dismissCloudDeletions(jobID: String)                               // "Decide later": report stays, status -> .idle
+    nonisolated public static func cloudDeletionsMessage(job: SyncJob) -> String   // "Some files were deleted in OneDrive. Choose what to do."
+    nonisolated public static func cloudDisplayName(_ job: SyncJob) -> String      // "OneDrive", remote name, or "the backup copy"
+    public static let massCloudDeletionRefusal: String
+}
+
+// EngineEnvironment gains (both with defaults, so existing callers compile):
+public var manifestDirectory: URL           // default: "manifests" next to config.json
+public var trashItem: (URL) throws -> Void  // default: EngineEnvironment.moveToTrash (FileManager.trashItem)
+
+// Notifying gains (default no-op in a protocol extension):
+func cloudDeletionsFound(job: SyncJob, count: Int)
+
+// PreviewResult gains `cloudDeleted: [ChangeItem]` (init parameter defaults to []).
+public static func SafetyRules.localFileInside(source: String, relativePath: String,
+                                               fileManager: FileManager = .default) -> Result<URL, EngineError>
+```
+
+- **Manifest.** After a real backup that ends with exit 0, no errors and status `.done`, the engine runs
+  `rclone lsjson <destination> -R --files-only --no-mimetype --no-modtime` with the sync's `--exclude`s and writes
+  `<manifestDirectory>/<jobID>.json` atomically: `{destination, date (the run's start, seconds since 1970), files: [{path, size}]}`.
+  A failed listing keeps the old manifest and adds a warning line to the run's log; the run is unaffected.
+  A manifest whose `destination` differs from the job's current destination is ignored. `removeJob` deletes it.
+- **Detection** runs at the start of every real backup and every preview, after the safety and source checks and
+  before the dry run, only when a manifest exists. Candidates: in the manifest, missing from the cloud now, still on the
+  disk under `job.source` as a regular file (no links anywhere on the way) with the same size and a modification date
+  not later than the manifest date. A destination folder that is gone entirely ("directory not found", exit 3) counts
+  as empty, except a folder on this Mac whose parent is missing (unplugged disk).
+  No candidates: carry on as before (and drop any stale report). Candidates: no backup; publish the report, status
+  `.needsAttention(cloudDeletionsMessage)`, `statusJobID = job.id`, and notify when the list is new. Automatic runs
+  (disk plugged in, back online) never start for a job with a report. A preview publishes the report too and lists
+  the files in `PreviewResult.cloudDeleted`; it doesn't change status beyond the usual `.idle`.
+  If the listing fails while a report is waiting, the backup stops with the same message (no silent re-upload).
+- **Decisions** are refused while another run is busy. `applyCloudDeletions` is refused without a report or for a mass
+  removal; it lists the cloud again, re-checks each file (still missing there; same size and modification date here)
+  and moves only those to the Trash through `SafetyRules.localFileInside` + `environment.trashItem` (the only place
+  Koffer removes anything locally; never a hard delete). The first failure stops it:
+  "Couldn't move <path> to the Trash: <reason>. Nothing else was changed after it." (the rest stays pending).
+  On success it clears the report and starts a normal backup (which records a fresh manifest).
+
+## UI additions (Module D)
+
+- A "Deleted in <cloud>" card in the attention area while `engine.cloudDeletions[job.id]` exists: one sentence with
+  count and size, a disclosure list of paths (200 max, "and N more"), a note about files added or renamed in the cloud,
+  and "Delete from this disk…" (confirmation; hidden for a mass removal, with an explanation instead),
+  "Put them back in <cloud>", "Decide later". The job's phase is "attention" while the report exists, so the backups
+  list shows it. The result of "Delete from this disk…" is shown inline, or as a small note once the card is gone.
+- The preview shows "Deleted in the cloud: N (they will be put back unless you choose otherwise)".
+- View state lives in `@Published` properties on `AppModel` (`confirmCloudDelete`, `cloudDeletionsExpanded`,
+  `previewCloudDeletedExpanded`, `cloudDeletionNote`), as before.

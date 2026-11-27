@@ -148,8 +148,11 @@ public struct PreviewResult: Equatable {
     public var jobID: String
     public var date: Date
     public var items: [ChangeItem]
-    public init(jobID: String, date: Date, items: [ChangeItem]) {
-        self.jobID = jobID; self.date = date; self.items = items
+    /// v0.3: files deleted in the cloud since the last backup that are still on this disk (kind `.removed`).
+    /// Unless the owner chooses otherwise, the backup puts them back (they also appear in `items` as new uploads).
+    public var cloudDeleted: [ChangeItem]
+    public init(jobID: String, date: Date, items: [ChangeItem], cloudDeleted: [ChangeItem] = []) {
+        self.jobID = jobID; self.date = date; self.items = items; self.cloudDeleted = cloudDeleted
     }
     public func items(_ kind: ChangeKind) -> [ChangeItem] { items.filter { $0.kind == kind } }
     public func count(_ kind: ChangeKind) -> Int { items(kind).count }
@@ -199,6 +202,13 @@ public protocol Notifying: AnyObject {
     func syncFinished(record: RunRecord)
     func syncPaused(job: SyncJob, reason: String)
     func syncFailed(job: SyncJob, reason: String)
+    /// v0.3: `count` files of `job` were deleted in the cloud but are still on this disk; Koffer waits for a decision.
+    func cloudDeletionsFound(job: SyncJob, count: Int)
+}
+
+public extension Notifying {
+    /// Default: say nothing (keeps older implementations and test fakes compiling).
+    func cloudDeletionsFound(job: SyncJob, count: Int) {}
 }
 
 public protocol PowerKeeping: AnyObject {

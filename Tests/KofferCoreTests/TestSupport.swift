@@ -12,6 +12,17 @@ final class FakeNotifier: Notifying {
     func syncFinished(record: RunRecord) { finished.append(record) }
     func syncPaused(job: SyncJob, reason: String) { paused.append((job.id, reason)) }
     func syncFailed(job: SyncJob, reason: String) { failed.append((job.id, reason)) }
+
+    var cloudFound: [(String, Int)] = []
+    func cloudDeletionsFound(job: SyncJob, count: Int) { cloudFound.append((job.id, count)) }
+}
+
+/// Does nothing beyond the four original calls: proves the new `cloudDeletionsFound` has a default.
+final class MinimalNotifier: Notifying {
+    func syncStarted(job: SyncJob) {}
+    func syncFinished(record: RunRecord) {}
+    func syncPaused(job: SyncJob, reason: String) {}
+    func syncFailed(job: SyncJob, reason: String) {}
 }
 
 final class FakePower: PowerKeeping {

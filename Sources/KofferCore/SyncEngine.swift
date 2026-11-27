@@ -43,6 +43,12 @@ public struct EngineEnvironment {
     public var reconnectTimeout: TimeInterval
     /// `refreshRemotes(force: false)` skips the check when the last one is younger than this.
     public var remotesCheckInterval: TimeInterval
+    /// v0.3: folder for `<jobID>.json`, what was in the cloud after the last clean backup.
+    /// Defaults to `manifests` next to the settings file (~/Library/Application Support/Koffer/manifests).
+    public var manifestDirectory: URL
+    /// v0.3: moves one local file to the Trash. Production: `FileManager.trashItem`. Koffer only ever calls it on a
+    /// file `SafetyRules.localFileInside` has just approved. Tests inject a fake that moves into a scratch folder.
+    public var trashItem: (URL) throws -> Void
 
     public init(configURL: URL, logDirectory: URL, rcloneCandidates: [String] = RcloneLocator.defaultCandidates,
                 mountDelay: TimeInterval = 10, interruptGrace: TimeInterval = 15,
@@ -53,7 +59,9 @@ public struct EngineEnvironment {
                 rcloneDownloadURL: URL = EngineEnvironment.defaultRcloneDownloadURL,
                 rcloneConfigPath: String? = nil,
                 reconnectTimeout: TimeInterval = 300,
-                remotesCheckInterval: TimeInterval = 60) {
+                remotesCheckInterval: TimeInterval = 60,
+                manifestDirectory: URL? = nil,
+                trashItem: @escaping (URL) throws -> Void = EngineEnvironment.moveToTrash) {
         self.configURL = configURL
         self.logDirectory = logDirectory
         self.rcloneCandidates = rcloneCandidates
@@ -69,6 +77,14 @@ public struct EngineEnvironment {
         self.rcloneConfigPath = rcloneConfigPath
         self.reconnectTimeout = reconnectTimeout
         self.remotesCheckInterval = remotesCheckInterval
+        self.manifestDirectory = manifestDirectory
+            ?? configURL.deletingLastPathComponent().appendingPathComponent("manifests", isDirectory: true)
+        self.trashItem = trashItem
+    }
+
+    /// Moves the item to the user's Trash (never deletes it).
+    public static func moveToTrash(_ url: URL) throws {
+        try FileManager.default.trashItem(at: url, resultingItemURL: nil)
     }
 
     public static let defaultBrewCandidates: [String] = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
@@ -124,6 +140,13 @@ public final class SyncEngine: ObservableObject {
     @Published public private(set) var installState: TaskState = .idle
     /// Signing in to a remote again.
     @Published public private(set) var reconnectState: TaskState = .idle
+
+    // v0.3: deleted in the cloud.
+    /// Job id -> files deleted in the cloud but still on this disk, waiting for the owner's decision.
+    /// While a job has a report, Koffer never starts that job on its own.
+    @Published public private(set) var cloudDeletions: [String: CloudDeletionReport] = [:]
+    /// Job id -> (path -> local modification date when the deletion was found), re-checked before deleting.
+    private var cloudDeletionDates: [String: [String: Date]] = [:]
 
     public let environment: EngineEnvironment
     private let services: EngineServices
@@ -229,15 +252,18 @@ public final class SyncEngine: ObservableObject {
         startSync(jobID: jobID, automatic: false)
     }
 
-    /// `automatic` is true for runs Koffer starts on its own (disk plugged in); those get extra caution.
-    private func startSync(jobID: String, automatic: Bool) {
+    /// `automatic` is true for runs Koffer starts on its own (disk plugged in); those get extra caution
+    /// and never start while files deleted in the cloud wait for a decision.
+    /// `skipCloudCheck` is true only right after the owner chose to put those files back.
+    private func startSync(jobID: String, automatic: Bool, skipCloudCheck: Bool = false) {
         guard !working, !status.isBusy else { return }
+        if automatic && cloudDeletions[jobID] != nil { return }
         reloadConfig()
         guard let job = self.job(id: jobID) else { return }
         beginWork(job: job)
         currentTask = Task { [weak self] in
             guard let self = self else { return }
-            let ran: Bool = await self.performSync(job: job, automatic: automatic)
+            let ran: Bool = await self.performSync(job: job, automatic: automatic, skipCloudCheck: skipCloudCheck)
             self.finishWork()
             if ran { self.refreshRemovedSize(jobID: job.id) }
         }
@@ -399,11 +425,17 @@ public final class SyncEngine: ObservableObject {
     // MARK: - Sync flow
 
     /// Returns true when the real sync ran (so the removed size may have changed).
-    private func performSync(job: SyncJob, automatic: Bool) async -> Bool {
+    private func performSync(job: SyncJob, automatic: Bool, skipCloudCheck: Bool) async -> Bool {
         await stopHelper()
         let startedAt: Date = environment.now()
 
         guard let rclone = prepare(job: job, notify: true) else { return false }
+
+        // 0. Files deleted in the cloud since the last backup: ask before putting them back.
+        if !skipCloudCheck {
+            let held: Bool = await holdForCloudDeletions(job: job, rclone: rclone)
+            if held { return false }
+        }
 
         let timeZone: TimeZone = environment.timeZone ?? TimeZone.current
         let stamp: String = RcloneCommand.stamp(for: startedAt, timeZone: timeZone)
@@ -509,6 +541,10 @@ public final class SyncEngine: ObservableObject {
         liveParser = nil
 
         let result: Outcome = outcome(exit: exitCode, parser: parser, job: job)
+        // A clean run: remember what is in the cloud now, so deletions made there can be noticed next time.
+        if exitCode == 0 && stopReason == nil && parser.progress.errors == 0 && result.status == .done {
+            await recordCloudManifest(job: job, rclone: rclone, date: startedAt, logHandle: log.handle)
+        }
         let p: SyncProgress = progress
         let record = RunRecord(jobID: job.id, jobName: job.name, startedAt: startedAt, endedAt: environment.now(),
                                outcome: result.run, uploaded: p.uploaded, moved: p.moved, removed: p.removed,
@@ -535,6 +571,7 @@ public final class SyncEngine: ObservableObject {
         await stopHelper()
         guard let rclone = prepare(job: job, notify: false) else { return }
         status = .previewing
+        guard let cloudDeleted = await previewCloudDeletions(job: job, rclone: rclone) else { return }
         let timeZone: TimeZone = environment.timeZone ?? TimeZone.current
         let args: [String] = RcloneCommand.sync(job: job, dryRun: true, date: environment.now(), timeZone: timeZone)
         if case .refused(let reason) = SafetyRules.assertSafe(arguments: args, removedRoot: job.removedRoot) {
@@ -551,7 +588,7 @@ public final class SyncEngine: ObservableObject {
             status = .needsAttention(reason)
             return
         }
-        preview = PreviewResult(jobID: job.id, date: environment.now(), items: parser.changeItems)
+        preview = PreviewResult(jobID: job.id, date: environment.now(), items: parser.changeItems, cloudDeleted: cloudDeleted)
         updateJob(job.id) { (j: inout SyncJob) in j.previewApproved = true }
         status = .idle
     }
@@ -764,7 +801,8 @@ public final class SyncEngine: ObservableObject {
         guard !working, !status.isBusy, !configBroken, mountedVolumes.contains(volume) else { return }
         reloadConfig()
         guard !configBroken else { return }
-        guard let job = jobs.first(where: { isAutoEligible($0) && $0.requiredVolume == volume }) else { return }
+        guard let job = jobs.first(where: { isAutoEligible($0) && $0.requiredVolume == volume && cloudDeletions[$0.id] == nil })
+        else { return }
         if !isOnline && needsNetwork(job) {
             pausedOfflineJobID = job.id
             return
@@ -1176,6 +1214,9 @@ extension SyncEngine {
         config = fresh
         jobs = fresh.jobs
         removedBytes[id] = nil
+        cloudDeletions[id] = nil
+        cloudDeletionDates[id] = nil
+        manifestStore.remove(jobID: id)
         if preview?.jobID == id { preview = nil }
         if pausedOfflineJobID == id { pausedOfflineJobID = nil }
         if !working && statusJobID == id {
@@ -1485,5 +1526,340 @@ extension SyncEngine {
         } else {
             reconnectState = .failed(RemoteParsing.reconnectFailure(remote: remote, status: result.status, stderr: result.stderr))
         }
+    }
+}
+
+// MARK: - v0.3: deleted in the cloud
+
+/// Listing the cloud copy with `rclone lsjson -R --files-only`.
+enum CloudListingResult {
+    case files([CloudManifest.Entry])
+    /// `stderr` for auth detection, `message` in plain words.
+    case failed(stderr: String, message: String)
+}
+
+/// Comparing the cloud copy with the last manifest.
+enum CloudCheckResult {
+    /// No manifest yet (or one for another destination): nothing to compare with.
+    case noManifest
+    /// Listed fine; nothing deleted in the cloud that is still here.
+    case clean
+    /// Candidates found, with each one's local modification date.
+    case found(CloudDeletionReport, [String: Date])
+    case listingFailed(stderr: String, message: String)
+}
+
+// In this file so it can use the engine's private state (`working`, `config`, `currentRunner`, ...).
+extension SyncEngine {
+    public static let checkingCloudMessage = "Checking the cloud copy"
+    public static let massCloudDeletionRefusal = "That's a large part of this backup, so Koffer won't delete these files from this disk. Put them back, or delete them on this disk directly."
+
+    /// "OneDrive", another remote's name, or "the backup copy" for a backup to a folder on this Mac.
+    nonisolated public static func cloudDisplayName(_ job: SyncJob) -> String {
+        if job.remoteName.isEmpty { return "the backup copy" }
+        return RemoteParsing.displayName(job.remoteName)
+    }
+
+    /// The status text while a job's cloud deletions wait for a decision.
+    nonisolated public static func cloudDeletionsMessage(job: SyncJob) -> String {
+        return "Some files were deleted in \(cloudDisplayName(job)). Choose what to do."
+    }
+
+    var manifestStore: ManifestStore {
+        return ManifestStore(directory: environment.manifestDirectory)
+    }
+
+    // MARK: Decisions
+
+    /// "Put them back": forgets the report and runs a normal backup that skips the cloud check once,
+    /// so the files are uploaded again. Does nothing while another run is busy.
+    public func keepLocalAndRestoreCloud(jobID: String) {
+        guard !working, !status.isBusy else { return }
+        guard job(id: jobID) != nil else { return }
+        clearCloudDeletions(jobID: jobID)
+        startSync(jobID: jobID, automatic: false, skipCloudCheck: true)
+    }
+
+    /// "Decide later": keeps the report (so Koffer still won't back this job up on its own) and only
+    /// takes the job's status back to idle.
+    public func dismissCloudDeletions(jobID: String) {
+        guard !working, !status.isBusy else { return }
+        if statusJobID == jobID {
+            status = .idle
+        }
+    }
+
+    /// "Delete from this disk": checks every file again right now (still gone from the cloud, same size and
+    /// modification date here), moves the ones that pass to the Trash, one by one, then forgets the report and
+    /// runs a normal backup (which records the cloud again). Never hard-deletes. Stops at the first file that
+    /// can't be moved. Refused for a report that looks like a mass removal, and while another run is busy.
+    /// Success = the number of files moved to the Trash.
+    public func applyCloudDeletions(jobID: String) async -> Result<Int, EngineError> {
+        if working || status.isBusy { return .failure(EngineError(SyncEngine.waitForBackupMessage)) }
+        guard let report = cloudDeletions[jobID] else {
+            return .failure(EngineError("There's nothing waiting to be deleted for this backup."))
+        }
+        if report.looksLikeMassRemoval { return .failure(EngineError(SyncEngine.massCloudDeletionRefusal)) }
+        reloadConfig()
+        if configBroken { return .failure(EngineError(SyncEngine.settingsUnreadableMessage)) }
+        guard let job = self.job(id: jobID) else { return .failure(EngineError("Koffer doesn't know that backup.")) }
+        if !job.enabled { return .failure(EngineError("\(job.name) is turned off")) }
+        if case .refused(let reason) = SafetyRules.check(job: job, config: config, homeDirectory: environment.homeDirectory) {
+            return .failure(EngineError(reason))
+        }
+        if let volume = job.requiredVolume, !mountedVolumes.contains(volume) {
+            return .failure(EngineError("The disk \(volume) isn't plugged in"))
+        }
+        if !isOnline && needsNetwork(job) {
+            return .failure(EngineError("No internet, so Koffer can't check \(SyncEngine.cloudDisplayName(job)). Nothing was deleted."))
+        }
+        if case .refused(let reason) = Preflight.checkSource(job.source) { return .failure(EngineError(reason)) }
+        guard let rclone = locateRclone() else { return .failure(EngineError(SyncEngine.rcloneMissingMessage)) }
+
+        let pendingMessage: String = SyncEngine.cloudDeletionsMessage(job: job)
+        let dates: [String: Date] = cloudDeletionDates[jobID] ?? [:]
+        beginWork(job: job)
+        await stopHelper()
+        status = .preparing(SyncEngine.checkingCloudMessage)
+
+        // 1. Still gone from the cloud?
+        let listing: CloudListingResult = await listCloud(job: job, rclone: rclone)
+        var cloudNow: Set<String> = []
+        switch listing {
+        case .files(let entries):
+            for entry in entries { cloudNow.insert(entry.path) }
+        case .failed(let stderr, let message):
+            let stopped: Bool = stopReason != nil
+            finishWork()
+            statusJobID = jobID
+            if !stopped && RcloneLogParser.looksLikeAuthProblem(stderr) {
+                needsReconnect = true
+                status = .needsAttention(ErrorClassifier.reconnectMessage)
+                return .failure(EngineError(ErrorClassifier.reconnectMessage + ". Nothing was deleted."))
+            }
+            status = .needsAttention(pendingMessage)
+            if stopped { return .failure(EngineError("Stopped. Nothing was deleted.")) }
+            return .failure(EngineError("Koffer couldn't check \(SyncEngine.cloudDisplayName(job)) right now, so nothing was deleted. " + message))
+        }
+        if stopReason != nil {
+            finishWork()
+            statusJobID = jobID
+            status = .needsAttention(pendingMessage)
+            return .failure(EngineError("Stopped. Nothing was deleted."))
+        }
+
+        // 2. Still the same file here?
+        var verified: [ChangeItem] = []
+        for item in report.items {
+            if cloudNow.contains(item.path) { continue }
+            guard let expected = dates[item.path], let size = item.size,
+                  let info = CloudDeletions.localInfo(relativePath: item.path, source: job.source) else { continue }
+            if info.size != size || info.modified != expected { continue }
+            verified.append(item)
+        }
+
+        // 3. To the Trash, one by one.
+        var moved: Set<String> = []
+        for item in verified {
+            if let problem = trashOne(relativePath: item.path, job: job) {
+                // Keep what is left waiting, without the files already in the Trash.
+                let remaining: [ChangeItem] = report.items.filter { !moved.contains($0.path) }
+                var remainingDates: [String: Date] = dates
+                for path in moved { remainingDates[path] = nil }
+                let bytes: Int64 = remaining.reduce(Int64(0)) { (sum: Int64, i: ChangeItem) -> Int64 in sum + (i.size ?? 0) }
+                cloudDeletions[jobID] = CloudDeletionReport(jobID: jobID, detectedAt: report.detectedAt, items: remaining,
+                                                            totalBytes: bytes, extrasCount: report.extrasCount,
+                                                            looksLikeMassRemoval: report.looksLikeMassRemoval)
+                cloudDeletionDates[jobID] = remainingDates
+                finishWork()
+                statusJobID = jobID
+                status = .needsAttention(pendingMessage)
+                var reason: String = problem
+                while reason.hasSuffix(".") { reason.removeLast() }
+                return .failure(EngineError("Couldn't move \(item.path) to the Trash: \(reason). Nothing else was changed after it."))
+            }
+            moved.insert(item.path)
+        }
+
+        // 4. Done: forget the report and back up (the files that changed or came back are simply backed up).
+        clearCloudDeletions(jobID: jobID)
+        finishWork()
+        status = .idle
+        startSync(jobID: jobID, automatic: false)
+        return .success(moved.count)
+    }
+
+    /// The only place Koffer removes anything from this disk: `SafetyRules.localFileInside` right before
+    /// `environment.trashItem` (the Trash, never a hard delete). Nil on success, otherwise the reason.
+    private func trashOne(relativePath: String, job: SyncJob) -> String? {
+        switch SafetyRules.localFileInside(source: job.source, relativePath: relativePath) {
+        case .failure(let error):
+            return error.message
+        case .success(let url):
+            do {
+                try environment.trashItem(url)
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }
+    }
+
+    private func clearCloudDeletions(jobID: String) {
+        if cloudDeletions[jobID] != nil { cloudDeletions[jobID] = nil }
+        cloudDeletionDates[jobID] = nil
+    }
+
+    // MARK: Checking
+
+    /// Before a real backup. Returns true when the backup must stop here (status is set).
+    /// Stops when files were deleted in the cloud (report published, owner notified when the list is new),
+    /// on an expired sign-in, and when the cloud can't be listed while a report is still waiting.
+    func holdForCloudDeletions(job: SyncJob, rclone: String) async -> Bool {
+        status = .preparing(SyncEngine.checkingCloudMessage)
+        let check: CloudCheckResult = await checkCloudDeletions(job: job, rclone: rclone)
+        if stopReason != nil {
+            finishEarly(job: job, outcome: outcome(exit: 0, parser: RcloneLogParser(), job: job), notify: true)
+            return true
+        }
+        let message: String = SyncEngine.cloudDeletionsMessage(job: job)
+        switch check {
+        case .noManifest, .clean:
+            clearCloudDeletions(jobID: job.id)
+            return false
+        case .found(let report, let dates):
+            let isNew: Bool = cloudDeletions[job.id]?.items != report.items
+            cloudDeletions[job.id] = report
+            cloudDeletionDates[job.id] = dates
+            finishEarly(job: job, outcome: Outcome(status: .needsAttention(message), run: .failed, message: message), notify: false)
+            if isNew { services.notifier.cloudDeletionsFound(job: job, count: report.items.count) }
+            return true
+        case .listingFailed(let stderr, _):
+            if RcloneLogParser.looksLikeAuthProblem(stderr) {
+                needsReconnect = true
+                let reconnect: String = ErrorClassifier.reconnectMessage
+                finishEarly(job: job, outcome: Outcome(status: .needsAttention(reconnect), run: .failed, message: reconnect), notify: true)
+                return true
+            }
+            if cloudDeletions[job.id] != nil {
+                // The owner hasn't decided yet; don't put the files back just because the check failed.
+                finishEarly(job: job, outcome: Outcome(status: .needsAttention(message), run: .failed, message: message), notify: false)
+                return true
+            }
+            // Anything else: the dry run reports the real problem.
+            return false
+        }
+    }
+
+    /// Before a preview. Returns the files deleted in the cloud (also published as a report), or nil when the
+    /// preview must stop (status is set).
+    func previewCloudDeletions(job: SyncJob, rclone: String) async -> [ChangeItem]? {
+        let check: CloudCheckResult = await checkCloudDeletions(job: job, rclone: rclone)
+        if stopReason != nil {
+            status = outcome(exit: 0, parser: RcloneLogParser(), job: job).status
+            return nil
+        }
+        switch check {
+        case .noManifest, .clean:
+            clearCloudDeletions(jobID: job.id)
+            return []
+        case .found(let report, let dates):
+            cloudDeletions[job.id] = report
+            cloudDeletionDates[job.id] = dates
+            return report.items
+        case .listingFailed(let stderr, _):
+            if RcloneLogParser.looksLikeAuthProblem(stderr) {
+                needsReconnect = true
+                status = .needsAttention(ErrorClassifier.reconnectMessage)
+                return nil
+            }
+            return cloudDeletions[job.id]?.items ?? []
+        }
+    }
+
+    /// Lists the cloud and compares it with the manifest (only when there is one for this destination).
+    func checkCloudDeletions(job: SyncJob, rclone: String) async -> CloudCheckResult {
+        guard let manifest = manifestStore.load(jobID: job.id, destination: job.destination) else { return .noManifest }
+        let listing: CloudListingResult = await listCloud(job: job, rclone: rclone)
+        switch listing {
+        case .failed(let stderr, let message):
+            return .listingFailed(stderr: stderr, message: message)
+        case .files(let cloud):
+            let source: String = job.source
+            let detection: CloudDeletions.Detection = CloudDeletions.detect(manifest: manifest, cloud: cloud) { (path: String) -> LocalFileInfo? in
+                return CloudDeletions.localInfo(relativePath: path, source: source)
+            }
+            if detection.candidates.isEmpty { return .clean }
+            let mass: Bool = CloudDeletions.looksLikeMassRemoval(candidates: detection.candidates.count,
+                                                                 manifestCount: manifest.files.count)
+            let report = CloudDeletionReport(jobID: job.id, detectedAt: environment.now(), items: detection.candidates,
+                                             totalBytes: detection.totalBytes, extrasCount: detection.extrasCount,
+                                             looksLikeMassRemoval: mass)
+            return .found(report, detection.modified)
+        }
+    }
+
+    /// `rclone lsjson <destination> -R --files-only ...` with the sync's excludes. Stoppable like a sync
+    /// (it runs as `currentRunner`). A destination folder that is gone counts as empty, except for a folder on
+    /// this Mac whose parent is missing too (an unplugged disk is not "everything deleted").
+    func listCloud(job: SyncJob, rclone: String) async -> CloudListingResult {
+        let args: [String] = RcloneCommand.listFiles(target: job.destination)
+        if case .refused(let reason) = SafetyRules.assertSafe(arguments: args, removedRoot: job.removedRoot) {
+            return .failed(stderr: "", message: reason)
+        }
+        let runner: RcloneRunner = makeRunner(rclone, args)
+        currentRunner = runner
+        if stopReason != nil { runner.interrupt(grace: environment.interruptGrace) }
+        let result = await runner.capture(timeout: 3600)
+        if currentRunner === runner { currentRunner = nil }
+        if stopReason != nil {
+            return .failed(stderr: result.stderr, message: "Stopped.")
+        }
+        if result.status == 0 {
+            if let entries = CloudDeletions.parseListing(result.stdout) { return .files(entries) }
+            return .failed(stderr: result.stderr, message: "Koffer couldn't read the list of files in \(SyncEngine.cloudDisplayName(job)).")
+        }
+        if result.status == 3 && result.stderr.lowercased().contains("directory not found")
+            && SyncEngine.missingDestinationMeansEmpty(job.destination) {
+            return .files([])
+        }
+        let line: String = RemoteParsing.lastErrorLine(result.stderr) ?? "rclone stopped with code \(result.status)"
+        return .failed(stderr: result.stderr, message: line)
+    }
+
+    nonisolated static func missingDestinationMeansEmpty(_ destination: String, fileManager: FileManager = .default) -> Bool {
+        guard let location = RcloneLocation.parse(destination) else { return false }
+        if !location.isLocal { return true }
+        let parent: String = (location.path as NSString).deletingLastPathComponent
+        var isDirectory: ObjCBool = false
+        return fileManager.fileExists(atPath: parent, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
+    /// After a clean backup: saves what is in the cloud now as `<manifestDirectory>/<jobID>.json`.
+    /// If listing or saving fails the old manifest stays, a note goes into the run's log, and the run is not affected.
+    func recordCloudManifest(job: SyncJob, rclone: String, date: Date, logHandle: FileHandle?) async {
+        let listing: CloudListingResult = await listCloud(job: job, rclone: rclone)
+        switch listing {
+        case .files(let entries):
+            let manifest = CloudManifest(destination: job.destination, date: date, files: entries)
+            do {
+                try manifestStore.save(manifest, jobID: job.id)
+            } catch {
+                writeLogNote(logHandle, "Koffer couldn't save its record of the cloud copy (\(error.localizedDescription)). The previous record was kept.")
+            }
+        case .failed(_, let message):
+            writeLogNote(logHandle, "Koffer couldn't list the cloud copy after this backup (\(message)). The previous record was kept.")
+        }
+    }
+
+    /// One JSON line in the run's log, shaped like rclone's own lines.
+    private func writeLogNote(_ handle: FileHandle?, _ text: String) {
+        guard let h = handle else { return }
+        let formatter = ISO8601DateFormatter()
+        let object: [String: Any] = ["time": formatter.string(from: environment.now()), "level": "warning",
+                                     "msg": text, "source": "koffer"]
+        guard var data = try? JSONSerialization.data(withJSONObject: object, options: []) else { return }
+        data.append(0x0A)
+        do { try h.write(contentsOf: data) } catch { /* a log write failure must not stop the run */ }
     }
 }
