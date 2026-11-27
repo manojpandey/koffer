@@ -267,12 +267,6 @@ struct CloudDeletionCard: View {
                 }
             }
         }
-        .confirmationDialog(confirmTitle, isPresented: $model.confirmCloudDelete, titleVisibility: .visible) {
-            Button("Move to Trash", role: .destructive) { model.applyCloudDeletions(for: job) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("You can restore them from the Trash.")
-        }
     }
 
     private var cloudName: String {
@@ -320,7 +314,16 @@ private struct CloudDeletionButtons: View {
         let busy: Bool = model.engine.status.isBusy
         VStack(alignment: .leading, spacing: Theme.Space.s) {
             if !report.looksLikeMassRemoval {
-                Button("Delete from this disk\u{2026}") { model.confirmCloudDelete = true }
+                Button("Delete from this disk\u{2026}") {
+                    let count: String = report.items.count == 1 ? "1 file" : "\(Format.count(report.items.count)) files"
+                    model.confirmation = PanelConfirmation(
+                        title: "Move \(count) to the Trash on \(model.diskName(for: job))?",
+                        message: "Each file is checked again first. You can restore them from the Trash.",
+                        confirmTitle: "Move to Trash",
+                        isDestructive: true,
+                        action: { model.applyCloudDeletions(for: job) }
+                    )
+                }
                     .buttonStyle(QuietButtonStyle(compact: true))
                     .disabled(busy || !model.canRun(job))
                     .help("Moves these files to the Trash, after checking each one again.")

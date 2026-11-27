@@ -30,6 +30,13 @@ cp "$BIN_DIR/Koffer" "$APP/Contents/MacOS/Koffer"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+# Stamp where this copy of the source lives, so "Update Koffer" in the panel can update it later.
+# (Only in the built app on this Mac; nothing here is committed.)
+/usr/bin/plutil -replace KofferSourceDirectory -string "$ROOT" "$APP/Contents/Info.plist" || true
+if COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)"; then
+  /usr/bin/plutil -replace KofferCommit -string "$COMMIT" "$APP/Contents/Info.plist" || true
+fi
+
 # Optional icon: never fatal.
 bash "$ROOT/scripts/make-icon.sh" || true
 if [ -f "$ROOT/build/AppIcon.icns" ]; then

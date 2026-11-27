@@ -15,28 +15,6 @@ struct BackupsList: View {
             }
             NewBackupRow()
         }
-        .confirmationDialog(forgetTitle, isPresented: $model.confirmForget, titleVisibility: .visible) {
-            Button("Forget backup") { model.forgetCandidate() }
-            Button("Cancel", role: .cancel) { model.forgetCandidateID = nil }
-        } message: {
-            Text(forgetMessage)
-        }
-    }
-
-    private var candidate: SyncJob? {
-        guard let id = model.forgetCandidateID else { return nil }
-        return model.engine.job(id: id)
-    }
-
-    private var forgetTitle: String {
-        "Forget \u{201C}\(candidate?.name ?? "this backup")\u{201D}?"
-    }
-
-    private var forgetMessage: String {
-        guard let job = candidate else { return "" }
-        return "Koffer stops looking after \(DisplayNames.abbreviated(job.source)). "
-            + "Nothing is deleted: the folder on this Mac, \(job.destination) and "
-            + "\(model.removedFolderName(for: job)) all stay as they are."
     }
 }
 

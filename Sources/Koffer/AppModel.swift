@@ -47,6 +47,8 @@ final class AppModel: ObservableObject {
     let engine: SyncEngine
     /// State of the "New backup" window.
     let newBackup: NewBackupModel
+    /// "Update Koffer" in Settings.
+    let updater: Updater
 
     private let notifier: Notifier
     private let power: PowerAssertion
@@ -75,6 +77,9 @@ final class AppModel: ObservableObject {
     @Published var forgetCandidateID: String? = nil
     /// Why "Forget this backup" was refused, shown inline in Settings.
     @Published var forgetRefusal: String? = nil
+    /// The in-panel confirmation currently shown (see ConfirmOverlay). System dialogs are not used inside
+    /// the menu bar panel: they take focus from it, and the panel closes as soon as they're dismissed.
+    @Published var confirmation: PanelConfirmation? = nil
     @Published var confirmEnable: Bool = false
     @Published var confirmEmpty: Bool = false
     @Published var showAllHistory: Bool = false
@@ -106,6 +111,7 @@ final class AppModel: ObservableObject {
         self.historyStore = history
         self.engine = engine
         self.newBackup = NewBackupModel(engine: engine)
+        self.updater = Updater()
         self.volumeWatcher = VolumeWatcher(
             onMount: { (name: String) in Task { @MainActor in engine.volumeMounted(name) } },
             onUnmount: { (name: String) in Task { @MainActor in engine.volumeUnmounted(name) } }
@@ -219,7 +225,17 @@ final class AppModel: ObservableObject {
     func askToForget(_ job: SyncJob) {
         forgetRefusal = nil
         forgetCandidateID = job.id
-        confirmForget = true
+        let message: String = "Koffer stops looking after \(DisplayNames.abbreviated(job.source)). "
+            + "Nothing is deleted: the folder on this Mac, \(job.destination) and "
+            + "\(removedFolderName(for: job)) all stay as they are."
+        confirmation = PanelConfirmation(
+            title: "Forget \u{201C}\(job.name)\u{201D}?",
+            message: message,
+            confirmTitle: "Forget backup",
+            isDestructive: false,
+            action: { [weak self] in self?.forgetCandidate() },
+            cancel: { [weak self] in self?.forgetCandidateID = nil }
+        )
     }
 
     func forgetCandidate() {
@@ -530,4 +546,14 @@ final class AppModel: ObservableObject {
     func quit() {
         NSApplication.shared.terminate(nil)
     }
+}
+
+/// A question asked inside the panel instead of in a system dialog.
+struct PanelConfirmation {
+    let title: String
+    let message: String
+    let confirmTitle: String
+    let isDestructive: Bool
+    let action: () -> Void
+    var cancel: () -> Void = {}
 }

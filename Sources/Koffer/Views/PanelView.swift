@@ -22,6 +22,7 @@ struct PanelView: View {
                 DispatchQueue.main.async { model.panelContentHeight = height }
             }
         }
+        .overlay { ConfirmOverlayHost() }
         .onAppear { model.panelAppeared() }
     }
 }
