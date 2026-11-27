@@ -16,7 +16,7 @@ struct ActionsView: View {
                         Label("Stop", systemImage: "stop.fill")
                     }
                     .buttonStyle(QuietButtonStyle())
-                    .help("Stops cleanly. The next backup picks up where this one stopped.")
+                    .help(stopHelp)
                 } else {
                     Button("Back up now") { model.engine.syncNow(jobID: job.id) }
                         .buttonStyle(GradientButtonStyle())
@@ -34,6 +34,13 @@ struct ActionsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    private var stopHelp: String {
+        if model.lookingProgress(for: job) != nil {
+            return "Stops looking. Nothing has been changed yet."
+        }
+        return "Stops cleanly. The next backup picks up where this one stopped."
     }
 }
 

@@ -116,6 +116,10 @@ public final class SyncEngine: ObservableObject {
     public static let stoppedByYouMessage = "Stopped by you"
     public static let unpluggedMessage = "Disk unplugged. Will resume next time"
     public static let offlineMessage = "No internet. Will resume next time"
+    /// v0.4: the `.preparing` step while "Back up now" runs its dry run (live progress is in `progress`).
+    public static let lookingMessage = "Looking at what changed"
+    /// v0.4: "Back up now" reuses a "What will change?" of the same job that finished less than this long ago.
+    public static let previewReuseWindow: TimeInterval = 600
 
     @Published public private(set) var status: EngineStatus = .idle
     @Published public private(set) var progress: SyncProgress = SyncProgress()
@@ -147,6 +151,25 @@ public final class SyncEngine: ObservableObject {
     @Published public private(set) var cloudDeletions: [String: CloudDeletionReport] = [:]
     /// Job id -> (path -> local modification date when the deletion was found), re-checked before deleting.
     private var cloudDeletionDates: [String: [String: Date]] = [:]
+
+    // v0.4: big folders.
+    /// When the run, preview or purge in flight started (nil when idle). The UI shows the time spent looking.
+    @Published public private(set) var busySince: Date? = nil
+    /// True while the run in flight compares file contents to match renames (rclone's default `hash` strategy),
+    /// because this job has no clean backup with this version yet. That first check reads a lot on a big folder.
+    @Published public private(set) var isFirstCheck: Bool = false
+    /// The last successful "What will change?" (any job), kept so "Back up now" can skip a second dry run.
+    private var lastPreview: PreviewRun? = nil
+    /// Volume name -> when it was last unplugged. A preview from before that is never reused.
+    private var volumeUnmountedAt: [String: Date] = [:]
+    /// Remote name with colon -> rclone backend type ("onedrive"), from `rclone listremotes --long`.
+    private var remoteTypes: [String: String] = [:]
+    private var remoteTypesLoaded: Bool = false
+    /// A cloud listing `applyCloudDeletions` just made, handed to the backup it starts so it isn't listed twice.
+    private var handedOverListing: HandedOverListing? = nil
+    /// Test hooks: dry runs started, and cloud listings (`lsjson -R`) run, since launch.
+    internal private(set) var dryRunCount: Int = 0
+    internal private(set) var cloudListingCount: Int = 0
 
     public let environment: EngineEnvironment
     private let services: EngineServices
@@ -305,6 +328,7 @@ public final class SyncEngine: ObservableObject {
 
     public func volumeUnmounted(_ name: String) {
         mountedVolumes.remove(name)
+        volumeUnmountedAt[name] = environment.now()
         mountTasks[name]?.cancel()
         mountTasks[name] = nil
         guard working, let job = runningJob else { return }
@@ -443,35 +467,52 @@ public final class SyncEngine: ObservableObject {
         let logHandles: [FileHandle] = log.handle.map { [$0] } ?? []
         defer { log.close() }
 
-        // 1. Dry run: learn what will change, and how much to upload.
-        status = .preparing("Looking at what changed")
-        progress = SyncProgress()
-        let dryArgs: [String] = RcloneCommand.sync(job: job, dryRun: true, date: startedAt, timeZone: timeZone)
-        if case .refused(let reason) = SafetyRules.assertSafe(arguments: dryArgs, removedRoot: job.removedRoot) {
-            finishEarly(job: job, outcome: Outcome(status: .needsAttention(reason), run: .failed, message: reason), notify: true)
-            return false
+        // 1. Dry run: learn what will change, and how much to upload. A manual backup right after
+        //    "What will change?" uses that preview instead (see `reusablePreview`).
+        let strategy: RenameStrategy = renameStrategy(for: job)
+        isFirstCheck = strategy == .hash
+        let items: [ChangeItem]
+        let checksTotal: Int
+        var usedPreview: Bool = false
+        if let reused = automatic ? nil : reusablePreview(for: job, strategy: strategy, now: environment.now()) {
+            items = reused.items
+            checksTotal = reused.checksTotal
+            usedPreview = true
+            writeLogNote(log.handle, "Koffer used the check from \"What will change?\" (\(Format.relativeDay(reused.finishedAt, now: environment.now()))) instead of running it again.")
+        } else {
+            status = .preparing(SyncEngine.lookingMessage)
+            let dryArgs: [String] = RcloneCommand.sync(job: job, dryRun: true, date: startedAt, timeZone: timeZone,
+                                                       renameStrategy: strategy)
+            if case .refused(let reason) = SafetyRules.assertSafe(arguments: dryArgs, removedRoot: job.removedRoot) {
+                finishEarly(job: job, outcome: Outcome(status: .needsAttention(reason), run: .failed, message: reason), notify: true)
+                return false
+            }
+            let dryParser = RcloneLogParser()
+            let dryExit: Int32 = await runLiveDryRun(rclone, dryArgs, parser: dryParser, logHandles: logHandles)
+            if stopReason != nil || dryExit != 0 {
+                finishEarly(job: job, outcome: outcome(exit: dryExit, parser: dryParser, job: job), notify: true)
+                return false
+            }
+            items = dryParser.changeItems
+            checksTotal = dryParser.progress.checksTotal
         }
-        let dryParser = RcloneLogParser()
-        let dryExit: Int32 = await runRclone(rclone, dryArgs, parser: dryParser, logHandles: logHandles, live: false)
-        if stopReason != nil || dryExit != 0 {
-            finishEarly(job: job, outcome: outcome(exit: dryExit, parser: dryParser, job: job), notify: true)
-            return false
-        }
-        let items: [ChangeItem] = dryParser.changeItems
         // A source that is a parent of a private or never-sync folder: refuse before anything is sent.
+        // (Checked against the settings as they are now, also for a reused preview.)
         if case .refused(let reason) = SafetyRules.checkItems(items, job: job, config: config) {
             finishEarly(job: job, outcome: Outcome(status: .needsAttention(reason), run: .failed, message: reason), notify: true)
             return false
         }
-        preview = PreviewResult(jobID: job.id, date: environment.now(), items: items)
+        if !usedPreview {
+            preview = PreviewResult(jobID: job.id, date: environment.now(), items: items)
+        }
         // Unattended runs stop when most of the cloud copy would be moved away (wrong disk, half-copied folder).
         let removedCount: Int = items.filter { $0.kind == .removed }.count
-        if automatic && SyncEngine.looksLikeMassRemoval(removed: removedCount, checked: dryParser.progress.checksTotal) {
+        if automatic && SyncEngine.looksLikeMassRemoval(removed: removedCount, checked: checksTotal) {
             let message = "This backup would remove \(Format.count(removedCount)) files from the cloud copy, so Koffer didn't start it on its own. Check the disk and \"What will change?\", then press \"Back up now\" if that's right."
             finishEarly(job: job, outcome: Outcome(status: .needsAttention(message), run: .failed, message: message), notify: true)
             return false
         }
-        let uploadBytes: Int64 = dryParser.dryRunUploadBytes
+        let uploadBytes: Int64 = SyncEngine.uploadBytes(items)
         let uploadFiles: Int = items.filter { $0.kind == .new || $0.kind == .replaced }.count
 
         // 2. Free space in the cloud.
@@ -518,11 +559,14 @@ public final class SyncEngine: ObservableObject {
         }
 
         // 3. The real sync.
-        let realArgs: [String] = RcloneCommand.sync(job: job, dryRun: false, date: startedAt, timeZone: timeZone)
+        let realArgs: [String] = RcloneCommand.sync(job: job, dryRun: false, date: startedAt, timeZone: timeZone,
+                                                    renameStrategy: strategy)
         if case .refused(let reason) = SafetyRules.assertSafe(arguments: realArgs, removedRoot: job.removedRoot) {
             finishEarly(job: job, outcome: Outcome(status: .needsAttention(reason), run: .failed, message: reason), notify: true)
             return false
         }
+        // From here on this job's cloud copy changes, so no earlier preview of it describes it any more.
+        if lastPreview?.jobID == job.id { lastPreview = nil }
         services.power.begin(reason: "Backing up \(job.name)")
         services.notifier.syncStarted(job: job)
         status = .syncing
@@ -567,30 +611,163 @@ public final class SyncEngine: ObservableObject {
         return true
     }
 
+    /// "What will change?": the cloud check, then a dry run with live progress and its own log
+    /// (`<jobID>_preview_<stamp>.log`). Stopped by the owner: back to `.idle`, nothing published, no history.
     private func performPreview(job: SyncJob) async {
         await stopHelper()
-        guard let rclone = prepare(job: job, notify: false) else { return }
-        status = .previewing
+        guard let rclone = prepare(job: job, notify: false) else {
+            if stopReason == .user { status = .idle }
+            return
+        }
+        let startedAt: Date = environment.now()
+        // Only the newest preview may stand in for a backup's dry run; a stopped or failed one leaves none.
+        lastPreview = nil
+        progress = SyncProgress()
+        status = .preparing(SyncEngine.checkingCloudMessage)
         guard let cloudDeleted = await previewCloudDeletions(job: job, rclone: rclone) else { return }
+        status = .previewing
         let timeZone: TimeZone = environment.timeZone ?? TimeZone.current
-        let args: [String] = RcloneCommand.sync(job: job, dryRun: true, date: environment.now(), timeZone: timeZone)
+        let strategy: RenameStrategy = renameStrategy(for: job)
+        isFirstCheck = strategy == .hash
+        let args: [String] = RcloneCommand.sync(job: job, dryRun: true, date: startedAt, timeZone: timeZone,
+                                                renameStrategy: strategy)
         if case .refused(let reason) = SafetyRules.assertSafe(arguments: args, removedRoot: job.removedRoot) {
             status = .needsAttention(reason)
             return
         }
+        let log: RunLog = openLog(jobID: job.id, stamp: RcloneCommand.stamp(for: startedAt, timeZone: timeZone), kind: "preview")
+        defer { log.close() }
+        let logHandles: [FileHandle] = log.handle.map { [$0] } ?? []
         let parser = RcloneLogParser()
-        let exitCode: Int32 = await runRclone(rclone, args, parser: parser, logHandles: [], live: false)
+        let exitCode: Int32 = await runLiveDryRun(rclone, args, parser: parser, logHandles: logHandles)
         if stopReason != nil || exitCode != 0 {
-            status = outcome(exit: exitCode, parser: parser, job: job).status
+            status = previewEndStatus(exit: exitCode, parser: parser, job: job)
             return
         }
-        if case .refused(let reason) = SafetyRules.checkItems(parser.changeItems, job: job, config: config) {
+        let items: [ChangeItem] = parser.changeItems
+        if case .refused(let reason) = SafetyRules.checkItems(items, job: job, config: config) {
             status = .needsAttention(reason)
             return
         }
-        preview = PreviewResult(jobID: job.id, date: environment.now(), items: parser.changeItems, cloudDeleted: cloudDeleted)
+        let finishedAt: Date = environment.now()
+        preview = PreviewResult(jobID: job.id, date: finishedAt, items: items, cloudDeleted: cloudDeleted)
+        lastPreview = PreviewRun(jobID: job.id, source: job.source, destination: job.destination, removedRoot: job.removedRoot,
+                                 startedAt: startedAt, finishedAt: finishedAt, items: items,
+                                 checksTotal: parser.progress.checksTotal,
+                                 hadCloudDeletions: !cloudDeleted.isEmpty || cloudDeletions[job.id] != nil,
+                                 renameStrategy: strategy)
         updateJob(job.id) { (j: inout SyncJob) in j.previewApproved = true }
         status = .idle
+    }
+
+    /// How a preview ends when rclone stopped early: `.idle` when the owner pressed Stop, otherwise as a run would.
+    private func previewEndStatus(exit: Int32, parser: RcloneLogParser, job: SyncJob) -> EngineStatus {
+        if stopReason == .user { return .idle }
+        return outcome(exit: exit, parser: parser, job: job).status
+    }
+
+    /// A dry run that publishes live progress (listed, checks, files being compared) like a real sync.
+    private func runLiveDryRun(_ rclone: String, _ args: [String], parser: RcloneLogParser,
+                               logHandles: [FileHandle]) async -> Int32 {
+        progress = SyncProgress()
+        floorFiles = 0
+        floorBytes = 0
+        lastProgressPublish = .distantPast
+        liveParser = parser
+        dryRunCount += 1
+        let exitCode: Int32 = await runRclone(rclone, args, parser: parser, logHandles: logHandles, live: true)
+        publishProgress(from: parser, force: true)
+        liveParser = nil
+        return exitCode
+    }
+
+    /// Bytes the items would upload (new + replaced).
+    nonisolated static func uploadBytes(_ items: [ChangeItem]) -> Int64 {
+        var total: Int64 = 0
+        for item in items where item.kind == .new || item.kind == .replaced {
+            total += item.size ?? 0
+        }
+        return total
+    }
+
+    // MARK: - v0.4: big folders
+
+    /// `.modtimeLeaf` once this job has a valid cloud record (a clean backup with this version), else `.hash`.
+    func renameStrategy(for job: SyncJob) -> RenameStrategy {
+        let hasRecord: Bool = manifestStore.load(jobID: job.id, destination: job.destination) != nil
+        return RenameStrategy.forJob(hasCleanRecord: hasRecord)
+    }
+
+    /// The last preview, when a manual "Back up now" may use it instead of a second dry run (see `canReuse`).
+    func reusablePreview(for job: SyncJob, strategy: RenameStrategy, now: Date) -> PreviewRun? {
+        guard let run = lastPreview else { return nil }
+        let ok: Bool = SyncEngine.canReuse(run, job: job, strategy: strategy, now: now,
+                                           reportPending: cloudDeletions[job.id] != nil,
+                                           unmountedAt: volumeUnmountedAt, window: SyncEngine.previewReuseWindow)
+        return ok ? run : nil
+    }
+
+    /// A preview stands in for the dry run of a manual backup when it is for the same job with the same source,
+    /// destination and removed-items folder, finished less than `window` ago, found nothing deleted in the cloud
+    /// (and nothing is waiting for a decision now), used the same rename strategy, and no disk the job reads from
+    /// was unplugged since it started. A real backup in between forgets the preview altogether.
+    nonisolated static func canReuse(_ run: PreviewRun, job: SyncJob, strategy: RenameStrategy, now: Date,
+                                     reportPending: Bool, unmountedAt: [String: Date], window: TimeInterval) -> Bool {
+        guard run.jobID == job.id, run.source == job.source, run.destination == job.destination,
+              run.removedRoot == job.removedRoot else { return false }
+        guard run.renameStrategy == strategy else { return false }
+        if run.hadCloudDeletions || reportPending { return false }
+        let age: TimeInterval = now.timeIntervalSince(run.finishedAt)
+        guard age >= 0, age < window else { return false }
+        for volume in SyncEngine.volumes(of: job) {
+            if let unplugged = unmountedAt[volume], unplugged >= run.startedAt { return false }
+        }
+        return true
+    }
+
+    /// The disks a job reads from: its required volume and the volume its folder is on (/Volumes/<name>/...).
+    nonisolated static func volumes(of job: SyncJob) -> [String] {
+        var result: [String] = []
+        if let v = job.requiredVolume, !v.isEmpty { result.append(v) }
+        let parts: [String] = job.source.split(separator: "/").map { String($0) }
+        if parts.count >= 2 && parts[0] == "Volumes" && !parts[1].isEmpty && !result.contains(parts[1]) {
+            result.append(parts[1])
+        }
+        return result
+    }
+
+    /// The rclone backend type of `remote` ("onedrive"), learned once from `rclone listremotes --long` and kept
+    /// until the next connection check. Nil for a folder on this Mac or when rclone can't say.
+    func remoteType(of remote: String, rclone: String) async -> String? {
+        let trimmed: String = remote.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return nil }
+        let name: String = trimmed.hasSuffix(":") ? trimmed : trimmed + ":"
+        if let known = remoteTypes[name] { return known }
+        if remoteTypesLoaded { return nil }
+        let args: [String] = RcloneCommand.listRemotes(long: true)
+        guard SafetyRules.assertSafe(arguments: args, removedRoot: "").isOK else { return nil }
+        let list = await makeRunner(rclone, args).capture(timeout: 30)
+        guard list.status == 0 else { return nil }
+        noteRemoteTypes(RemoteParsing.parseListRemotesLong(list.stdout))
+        return remoteTypes[name]
+    }
+
+    private func noteRemoteTypes(_ types: [String: String]) {
+        remoteTypes = types
+        remoteTypesLoaded = true
+    }
+
+    private func forgetRemoteTypes() {
+        remoteTypes = [:]
+        remoteTypesLoaded = false
+    }
+
+    /// `<jobID>_<stamp>.log` for a backup, `<jobID>_<kind>_<stamp>.log` otherwise (kind "preview").
+    nonisolated static func logFileName(jobID: String, stamp: String, kind: String?) -> String {
+        let bad: Set<Character> = ["/", ":", "\\"]
+        let safe: String = String(jobID.map { bad.contains($0) ? "_" : $0 })
+        if let k = kind, !k.isEmpty { return safe + "_" + k + "_" + stamp + ".log" }
+        return safe + "_" + stamp + ".log"
     }
 
     /// Checks shared by sync and preview. Returns the rclone path, or nil after setting status.
@@ -753,6 +930,7 @@ public final class SyncEngine: ObservableObject {
         activeJobID = job.id
         statusJobID = job.id
         stopReason = nil
+        busySince = Date()
     }
 
     private func finishWork() {
@@ -762,6 +940,8 @@ public final class SyncEngine: ObservableObject {
         stopReason = nil
         currentRunner = nil
         liveParser = nil
+        busySince = nil
+        if isFirstCheck { isFirstCheck = false }
     }
 
     private func stopHelper() async {
@@ -893,17 +1073,13 @@ public final class SyncEngine: ObservableObject {
         return Set(names.filter { !$0.hasPrefix(".") })
     }
 
-    private static func safeFileName(_ s: String) -> String {
-        let bad: Set<Character> = ["/", ":", "\\"]
-        return String(s.map { bad.contains($0) ? "_" : $0 })
-    }
-
-    private func openLog(jobID: String, stamp: String) -> RunLog {
+    /// `kind` nil = a backup's log; "preview" = a "What will change?" log (see `logFileName`).
+    private func openLog(jobID: String, stamp: String, kind: String? = nil) -> RunLog {
         let fm = FileManager.default
         let dir: URL = environment.logDirectory
         do {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
-            let url = dir.appendingPathComponent("\(SyncEngine.safeFileName(jobID))_\(stamp).log")
+            let url = dir.appendingPathComponent(SyncEngine.logFileName(jobID: jobID, stamp: stamp, kind: kind))
             if !fm.fileExists(atPath: url.path) {
                 _ = fm.createFile(atPath: url.path, contents: nil, attributes: nil)
             }
@@ -975,6 +1151,8 @@ extension SyncEngine {
         guard let rclone = locateRclone() else { return }
         lastRemotesCheck = environment.now()
         remotesRefreshPending = false
+        // Remotes may have been set up again: learn their types afresh when next needed.
+        forgetRemoteTypes()
         remotesTask = Task { [weak self] in
             guard let self = self else { return }
             await self.performRemotesRefresh(rclone: rclone)
@@ -1218,6 +1396,8 @@ extension SyncEngine {
         cloudDeletionDates[id] = nil
         manifestStore.remove(jobID: id)
         if preview?.jobID == id { preview = nil }
+        if lastPreview?.jobID == id { lastPreview = nil }
+        if handedOverListing?.jobID == id { handedOverListing = nil }
         if pausedOfflineJobID == id { pausedOfflineJobID = nil }
         if !working && statusJobID == id {
             status = .idle
@@ -1478,6 +1658,7 @@ extension SyncEngine {
         if SafetyRules.assertSafe(arguments: longArgs, removedRoot: "").isOK {
             let list = await makeRunner(rclone, longArgs).capture(timeout: 30)
             let types: [String: String] = list.status == 0 ? RemoteParsing.parseListRemotesLong(list.stdout) : [:]
+            if list.status == 0 { noteRemoteTypes(types) }
             if (types[remote] ?? "").lowercased() == "onedrive" {
                 let redactedArgs: [String] = RcloneCommand.configRedacted(remote: remote)
                 if SafetyRules.assertSafe(arguments: redactedArgs, removedRoot: "").isOK {
@@ -1527,6 +1708,32 @@ extension SyncEngine {
             reconnectState = .failed(RemoteParsing.reconnectFailure(remote: remote, status: result.status, stderr: result.stderr))
         }
     }
+}
+
+// MARK: - v0.4: big folders
+
+/// A successful "What will change?", kept so a manual "Back up now" soon after can skip its own dry run.
+struct PreviewRun: Equatable {
+    var jobID: String
+    var source: String
+    var destination: String
+    var removedRoot: String
+    var startedAt: Date
+    var finishedAt: Date
+    var items: [ChangeItem]
+    /// The dry run's `totalChecks`.
+    var checksTotal: Int
+    /// The preview found files deleted in the cloud (then the owner decides first; never reused).
+    var hadCloudDeletions: Bool
+    var renameStrategy: RenameStrategy
+}
+
+/// A cloud listing made by `applyCloudDeletions`, used by the backup it starts right after.
+struct HandedOverListing {
+    var jobID: String
+    var destination: String
+    var entries: [CloudManifest.Entry]
+    var listedAt: Date
 }
 
 // MARK: - v0.3: deleted in the cloud
@@ -1625,8 +1832,10 @@ extension SyncEngine {
         // 1. Still gone from the cloud?
         let listing: CloudListingResult = await listCloud(job: job, rclone: rclone)
         var cloudNow: Set<String> = []
+        var cloudEntries: [CloudManifest.Entry] = []
         switch listing {
         case .files(let entries):
+            cloudEntries = entries
             for entry in entries { cloudNow.insert(entry.path) }
         case .failed(let stderr, let message):
             let stopped: Bool = stopReason != nil
@@ -1682,7 +1891,10 @@ extension SyncEngine {
         }
 
         // 4. Done: forget the report and back up (the files that changed or came back are simply backed up).
+        //    The cloud was listed a moment ago and Koffer changed nothing there, so the backup's check uses that list.
         clearCloudDeletions(jobID: jobID)
+        handedOverListing = HandedOverListing(jobID: jobID, destination: job.destination, entries: cloudEntries,
+                                              listedAt: environment.now())
         finishWork()
         status = .idle
         startSync(jobID: jobID, automatic: false)
@@ -1756,7 +1968,7 @@ extension SyncEngine {
     func previewCloudDeletions(job: SyncJob, rclone: String) async -> [ChangeItem]? {
         let check: CloudCheckResult = await checkCloudDeletions(job: job, rclone: rclone)
         if stopReason != nil {
-            status = outcome(exit: 0, parser: RcloneLogParser(), job: job).status
+            status = previewEndStatus(exit: 0, parser: RcloneLogParser(), job: job)
             return nil
         }
         switch check {
@@ -1780,7 +1992,12 @@ extension SyncEngine {
     /// Lists the cloud and compares it with the manifest (only when there is one for this destination).
     func checkCloudDeletions(job: SyncJob, rclone: String) async -> CloudCheckResult {
         guard let manifest = manifestStore.load(jobID: job.id, destination: job.destination) else { return .noManifest }
-        let listing: CloudListingResult = await listCloud(job: job, rclone: rclone)
+        let listing: CloudListingResult
+        if let handed = takeHandedOverListing(job: job) {
+            listing = .files(handed)
+        } else {
+            listing = await listCloud(job: job, rclone: rclone, backupBytes: manifest.totalBytes)
+        }
         switch listing {
         case .failed(let stderr, let message):
             return .listingFailed(stderr: stderr, message: message)
@@ -1802,11 +2019,14 @@ extension SyncEngine {
     /// `rclone lsjson <destination> -R --files-only ...` with the sync's excludes. Stoppable like a sync
     /// (it runs as `currentRunner`). A destination folder that is gone counts as empty, except for a folder on
     /// this Mac whose parent is missing too (an unplugged disk is not "everything deleted").
-    func listCloud(job: SyncJob, rclone: String) async -> CloudListingResult {
-        let args: [String] = RcloneCommand.listFiles(target: job.destination)
+    /// v0.4: on OneDrive with `--onedrive-delta` when that pays off (see `RcloneCommand.wantsOneDriveDelta`);
+    /// `backupBytes` is the size of the backup if known (from the last record).
+    func listCloud(job: SyncJob, rclone: String, backupBytes: Int64? = nil) async -> CloudListingResult {
+        let args: [String] = await listFilesArguments(job: job, rclone: rclone, backupBytes: backupBytes)
         if case .refused(let reason) = SafetyRules.assertSafe(arguments: args, removedRoot: job.removedRoot) {
             return .failed(stderr: "", message: reason)
         }
+        cloudListingCount += 1
         let runner: RcloneRunner = makeRunner(rclone, args)
         currentRunner = runner
         if stopReason != nil { runner.interrupt(grace: environment.interruptGrace) }
@@ -1825,6 +2045,35 @@ extension SyncEngine {
         }
         let line: String = RemoteParsing.lastErrorLine(result.stderr) ?? "rclone stopped with code \(result.status)"
         return .failed(stderr: result.stderr, message: line)
+    }
+
+    /// `rclone lsjson -R ...` for the job's destination, with `--onedrive-delta` on a OneDrive remote unless the
+    /// backup is known to be less than half of what the drive holds.
+    func listFilesArguments(job: SyncJob, rclone: String, backupBytes: Int64?) async -> [String] {
+        let type: String? = await remoteType(of: job.remoteName, rclone: rclone)
+        guard (type ?? "").lowercased() == "onedrive" else {
+            return RcloneCommand.listFiles(target: job.destination)
+        }
+        var used: Int64? = nil
+        let state: RemoteState = remoteStates[job.remoteName] ?? .unknown
+        if case .connected(let u, _, _) = state { used = u }
+        var bytes: Int64? = backupBytes
+        if bytes == nil && used != nil {
+            bytes = manifestStore.load(jobID: job.id, destination: job.destination)?.totalBytes
+        }
+        let delta: Bool = RcloneCommand.wantsOneDriveDelta(remoteType: type, backupBytes: bytes, driveUsedBytes: used)
+        return RcloneCommand.listFiles(target: job.destination, oneDriveDelta: delta)
+    }
+
+    /// The listing `applyCloudDeletions` handed over for this job, if it is for the same destination and recent.
+    /// Used once.
+    private func takeHandedOverListing(job: SyncJob) -> [CloudManifest.Entry]? {
+        guard let handed = handedOverListing else { return nil }
+        handedOverListing = nil
+        guard handed.jobID == job.id, ManifestStore.sameDestination(handed.destination, job.destination) else { return nil }
+        let age: TimeInterval = environment.now().timeIntervalSince(handed.listedAt)
+        guard age >= 0, age <= 300 else { return nil }
+        return handed.entries
     }
 
     nonisolated static func missingDestinationMeansEmpty(_ destination: String, fileManager: FileManager = .default) -> Bool {

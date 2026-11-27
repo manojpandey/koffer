@@ -312,3 +312,67 @@ public static func SafetyRules.localFileInside(source: String, relativePath: Str
 - The preview shows "Deleted in the cloud: N (they will be put back unless you choose otherwise)".
 - View state lives in `@Published` properties on `AppModel` (`confirmCloudDelete`, `cloudDeletionsExpanded`,
   `previewCloudDeletedExpanded`, `cloudDeletionNote`), as before.
+
+---
+
+# v0.4: big folders
+
+Product rule: on a big folder (hundreds of GB, tens of thousands of files) "What will change?" and "Back up now" show
+what they are doing while they look, can be stopped, and get quick once the first clean backup is done.
+
+## Engine additions (Module A)
+
+```swift
+// Models.swift: SyncProgress gains (defaults, so existing initialisers compile)
+public var listed: Int = 0                 // stats `listed`: entries listed so far, both sides, folders included
+public var currentChecks: [String] = []    // stats `checking`: paths being compared right now
+public var checksFraction: Double? { get } // checksDone / checksTotal, nil until some checks are done
+
+public enum RenameStrategy: String { case hash, modtimeLeaf
+    public static func forJob(hasCleanRecord: Bool) -> RenameStrategy   // the one place the choice is made
+}
+RcloneCommand.sync(job:dryRun:date:timeZone:renameStrategy: RenameStrategy = .hash)
+    // .modtimeLeaf adds "--track-renames-strategy", "modtime,leaf" right after "--track-renames"
+RcloneCommand.listFiles(target:oneDriveDelta: Bool = false)   // appends "--onedrive-delta"
+RcloneCommand.wantsOneDriveDelta(remoteType:backupBytes:driveUsedBytes:) -> Bool
+
+extension SyncEngine {
+    @Published public private(set) var busySince: Date?     // when the run/preview in flight started
+    @Published public private(set) var isFirstCheck: Bool   // the run in flight matches renames by content (no record yet)
+    public static let lookingMessage: String                // .preparing step while "Back up now" runs its dry run
+    public static let previewReuseWindow: TimeInterval      // 600
+}
+```
+
+- **Live, logged previews.** The preview's dry run and the dry run inside "Back up now" publish `progress` like a
+  real sync (listed, checks, `currentChecks`). The preview writes `~/Library/Logs/Koffer/<jobID>_preview_<stamp>.log`
+  (not copied to `extraLogDirectory`: a preview never changes the folder); a backup's dry run stays in the backup's log.
+  While a preview checks the cloud copy the status is `.preparing(checkingCloudMessage)`, then `.previewing`;
+  "Back up now" uses `.preparing(lookingMessage)` for its dry run. `cancel()` stops a preview cleanly: status `.idle`,
+  no history entry, no `preview` published, `previewApproved` unchanged.
+- **Rename strategy.** With a valid manifest (a clean backup with this version, so rclone has set the cloud's
+  modification times) both the dry run and the real sync use `--track-renames-strategy modtime,leaf`: renames are
+  still server-side moves and no file contents are read. Otherwise rclone's default (`hash`). `assertSafe` allows the
+  flag on `sync` only with `--track-renames` and only rclone's strategies (hash, modtime, leaf), and still requires
+  `--backup-dir` inside the removed-items folder.
+- **No second dry run.** A manual "Back up now" uses the items and totals of the last "What will change?" (for the
+  free-space check, `checkItems` against the settings as they are now, and the progress totals) when it is for the same
+  job with the same source, destination and removed-items folder, finished less than 10 minutes ago, found nothing
+  deleted in the cloud, nothing is waiting for a decision now, the rename strategy is the same, and no disk the job reads
+  from was unplugged since it started (`volumeUnmounted` records the time). A new preview, a stopped or failed one, or
+  the real sync of that job forgets it. Automatic runs always do their own dry run. The cloud-deletion check still runs
+  before every backup. The backup's log says when a preview was used.
+- **Cloud listings.** Koffer's own `lsjson -R` (manifest and cloud-deletion check) adds `--onedrive-delta` when the
+  remote's type (from `listremotes --long`, cached until the next connection check) is `onedrive`, unless the last
+  record says the backup is less than half of the drive's used space. Never on a sync: `assertSafe` refuses
+  `--onedrive-delta` on anything but `lsjson`. After "Delete from this disk" the backup it starts uses the listing the
+  decision just made (within 5 minutes, once) instead of listing again; the record after the backup always lists again.
+
+## UI additions (Module D)
+
+- While previewing or preparing (`AppModel.lookingProgress(for:)`), the hero shows the ring (checks-based once rclone
+  has counted, otherwise circling) and plain lines: "Listing files… 12,400 found", "Comparing files… 8,400 of 22,000"
+  or "Matching moved files…", the file being compared (middle-truncated, secondary), the elapsed time
+  (`Format.duration`, ticking), and, when `engine.isFirstCheck`, one quiet line: "The first check compares file
+  contents and can take a while for a large folder." While the cloud copy is checked: "Checking OneDrive…".
+  The primary button reads "Stop" (`engine.cancel()`) for previews too.

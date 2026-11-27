@@ -118,6 +118,39 @@ final class SafetyRulesTests: XCTestCase {
         assertRefused(SafetyRules.assertSafe(arguments: args3, removedRoot: j.removedRoot))
     }
 
+    func testAssertSafeRenameStrategy() {
+        let j = job()
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let fast = RcloneCommand.sync(job: j, dryRun: false, date: date, renameStrategy: .modtimeLeaf)
+        XCTAssertEqual(SafetyRules.assertSafe(arguments: fast, removedRoot: j.removedRoot), .ok)
+        XCTAssertEqual(SafetyRules.assertSafe(arguments: RcloneCommand.sync(job: j, dryRun: true, date: date, renameStrategy: .modtimeLeaf),
+                                              removedRoot: j.removedRoot), .ok)
+        XCTAssertEqual(SafetyRules.assertSafe(arguments: fast + ["--track-renames-strategy=hash"], removedRoot: j.removedRoot), .ok)
+        // Still needs the removed-items folder.
+        var noBackup: [String] = fast
+        if let i = noBackup.firstIndex(of: "--backup-dir") { noBackup.removeSubrange(i...(i + 1)) }
+        assertRefused(SafetyRules.assertSafe(arguments: noBackup, removedRoot: j.removedRoot))
+        // Unknown strategies, a missing value, or a strategy without --track-renames.
+        assertRefused(SafetyRules.assertSafe(arguments: fast + ["--track-renames-strategy", "size"], removedRoot: j.removedRoot))
+        assertRefused(SafetyRules.assertSafe(arguments: fast + ["--track-renames-strategy=modtime,,leaf"], removedRoot: j.removedRoot))
+        assertRefused(SafetyRules.assertSafe(arguments: fast + ["--track-renames-strategy"], removedRoot: j.removedRoot))
+        let withoutTracking: [String] = fast.filter { $0 != "--track-renames" }
+        assertRefused(SafetyRules.assertSafe(arguments: withoutTracking, removedRoot: j.removedRoot))
+    }
+
+    func testOneDriveDeltaOnlyOnListings() {
+        let j = job()
+        let root = j.removedRoot
+        XCTAssertEqual(SafetyRules.assertSafe(arguments: RcloneCommand.listFiles(target: j.destination, oneDriveDelta: true),
+                                              removedRoot: root), .ok)
+        var sync = RcloneCommand.sync(job: j, dryRun: true, date: Date(timeIntervalSince1970: 1_700_000_000))
+        sync.append("--onedrive-delta")
+        assertRefused(SafetyRules.assertSafe(arguments: sync, removedRoot: root))
+        assertRefused(SafetyRules.assertSafe(arguments: ["size", root, "--json", "--onedrive-delta"], removedRoot: root))
+        assertRefused(SafetyRules.assertSafe(arguments: ["purge", root, "--ONEDRIVE-DELTA=true"], removedRoot: root))
+        assertRefused(SafetyRules.assertSafe(arguments: ["about", "onedrive:", "--onedrive-delta"], removedRoot: root))
+    }
+
     func testAssertSafeRejectsPurgeOutsideRemovedRoot() {
         let root = "onedrive:_Archive_removed"
         assertRefused(SafetyRules.assertSafe(arguments: ["purge", "onedrive:Archive"], removedRoot: root))

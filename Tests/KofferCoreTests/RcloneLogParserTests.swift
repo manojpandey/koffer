@@ -152,6 +152,48 @@ final class RcloneLogParserTests: XCTestCase {
         XCTAssertEqual(snapshots, [548864, 1073152, 1597440])
     }
 
+    /// 08: a real `--dry-run --track-renames` (hash strategy) while rclone hashes files to match a renamed folder.
+    /// Stats carry `listed` and a `checking` list of plain path strings; "update modification time" lines are no change.
+    func testDryRunWhileHashingReportsListedAndChecking() throws {
+        let parser = RcloneLogParser()
+        var snapshots: [SyncProgress] = []
+        for line in try Fixtures.lines("08_dryrun_hashing") {
+            if parser.consume(line: line).contains(.stats) { snapshots.append(parser.progress) }
+        }
+        XCTAssertEqual(snapshots.count, 8)
+        let first = try XCTUnwrap(snapshots.first)
+        XCTAssertEqual(first.listed, 626)
+        XCTAssertEqual(first.checksDone, 298)
+        XCTAssertEqual(first.checksTotal, 310)
+        XCTAssertEqual(first.currentChecks.count, 12)
+        XCTAssertEqual(first.currentChecks.first, "A/big_12.bin")
+        XCTAssertTrue(first.currentFiles.isEmpty, "nothing is transferred in a dry run")
+        XCTAssertEqual(first.checksFraction ?? -1, 298.0 / 310.0, accuracy: 0.0001)
+
+        let last = try XCTUnwrap(snapshots.last)
+        XCTAssertEqual(last.currentChecks, [], "no checking list once done")
+        XCTAssertEqual(last.checksDone, 324)
+        XCTAssertEqual(last.checksTotal, 324)
+        XCTAssertEqual(last.listed, 626)
+
+        let items = parser.changeItems
+        XCTAssertEqual(items.filter { $0.kind == .moved }.count, 12)
+        XCTAssertEqual(items.filter { $0.kind == .removed }.map { $0.path }, ["B/s_1.txt", "B/s_2.txt"])
+        XCTAssertEqual(items.filter { $0.kind == .new || $0.kind == .replaced }.count, 0,
+                       "a changed modification time alone uploads nothing")
+        XCTAssertTrue(parser.errorLines.isEmpty, "\(parser.errorLines)")
+    }
+
+    func testStatsNamesAcceptStringsAndObjects() {
+        let named: [String: Any] = ["name": "c.txt"]
+        let unnamed: [String: Any] = ["x": 1]
+        let mixed: [Any] = ["a/b.txt", named, 3, unnamed, ""]
+        XCTAssertEqual(RcloneLogParser.names(mixed), ["a/b.txt", "c.txt"])
+        XCTAssertEqual(RcloneLogParser.names(nil), [])
+        XCTAssertEqual(RcloneLogParser.names("not a list"), [])
+        XCTAssertNil(SyncProgress().checksFraction)
+    }
+
     func testGarbageIsIgnored() {
         let parser = RcloneLogParser()
         let junk: [String] = ["", "   ", "hello", "{", "{\"stats\": 5}", "[1,2,3]", "{\"msg\": 7, \"level\": []}",

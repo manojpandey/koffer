@@ -25,7 +25,9 @@ struct HeroRing: View {
         case .syncing:
             if let f = fraction { return "\(Int((f * 100).rounded(.down))) percent" }
             return "Starting"
-        case .working(let step): return step
+        case .working(let step):
+            if let f = fraction { return "\(step), \(Int((f * 100).rounded(.down))) percent compared" }
+            return step
         case .done: return "Everything is backed up"
         case .paused: return "Paused"
         case .attention: return "Needs your attention"
@@ -48,7 +50,12 @@ private struct RingFill: View {
         case .syncing:
             GradientArc(fraction: fraction ?? 0)
         case .working:
-            SpinningArc()
+            if let f = fraction {
+                // Files compared so far (a rough guide: the total can still grow while rclone lists).
+                GradientArc(fraction: f)
+            } else {
+                SpinningArc()
+            }
         case .paused:
             GradientArc(fraction: fraction ?? 0)
                 .saturation(0)

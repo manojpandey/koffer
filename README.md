@@ -13,6 +13,10 @@ Koffer (Dutch for "suitcase") is a small macOS menu bar app that backs a folder 
 
 Your disk is the master copy, so normally anything missing in the cloud is uploaded again. But if you delete files in the cloud copy yourself (say, in the OneDrive website), Koffer notices before the next backup and asks instead of quietly putting them back. After every clean backup it remembers what is in the cloud; next time it compares. If files are gone from the cloud but unchanged on your disk, it holds the backup (automatic ones too) and shows a card with three choices: **Delete from this disk** (it checks each file again and moves it to the Trash, never deletes it outright), **Put them back** in the cloud, or **Decide later**. Files you changed on the disk since are simply backed up again. When a large part of the backup is missing, Koffer only offers to put it back: that usually means a folder was moved or deleted by mistake.
 
+### Big folders
+
+The first check of a big folder can take a while. If the copy in the cloud was uploaded earlier by another app, its files carry other modification dates, so rclone has to read files on your disk to compare them (and to recognise renamed ones), and "What will change?" shows what it is doing: how many files it has listed, how many it has compared, the file it is on and how long it has been going. You can stop it at any time; nothing has changed yet. After the first backup has finished cleanly, the dates match and Koffer recognises renames by name, size and date, so later checks are quick. If you press "Back up now" within ten minutes of "What will change?", Koffer uses that check instead of doing it again.
+
 ## Requirements
 
 - macOS 14 or newer

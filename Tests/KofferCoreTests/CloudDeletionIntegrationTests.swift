@@ -238,6 +238,32 @@ final class CloudDeletionIntegrationTests: XCTestCase {
         XCTAssertTrue(files(under: removed).isEmpty)
     }
 
+    /// v0.4: the backup that follows "Delete from this disk" uses the listing the decision just made;
+    /// only the record after the backup lists the cloud again.
+    @MainActor
+    func testApplyHandsItsCloudListingToTheBackup() async throws {
+        try makeSourceFiles()
+        let engine = try await makeEngine(job: job())
+        await firstSync(engine)
+        try deleteInCloud(["B/note.txt"])
+        await runSync(engine)
+        XCTAssertNotNil(engine.cloudDeletions["archive"])
+
+        let before: Int = engine.cloudListingCount
+        let result = await engine.applyCloudDeletions(jobID: "archive")
+        XCTAssertEqual(result, .success(1))
+        await engine.currentTask?.value
+        XCTAssertEqual(engine.status, .done)
+        XCTAssertEqual(engine.cloudListingCount - before, 2, "apply lists once; the record after the backup lists again")
+        XCTAssertEqual(files(under: dst), files(under: src))
+
+        // The hand-over is used once: the next backup lists for itself.
+        let again: Int = engine.cloudListingCount
+        await runSync(engine)
+        XCTAssertEqual(engine.status, .done)
+        XCTAssertEqual(engine.cloudListingCount - again, 2, "the check before and the record after")
+    }
+
     @MainActor
     func testApplyChecksEachFileAgain() async throws {
         try makeSourceFiles()

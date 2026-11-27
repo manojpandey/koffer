@@ -264,19 +264,30 @@ public final class RcloneLogParser {
         if let v = RcloneLogParser.int(s["deletes"]) { p.removed = v }
         if let v = RcloneLogParser.int(s["errors"]) { p.errors = v }
         if let e = s["lastError"] as? String, !e.isEmpty { lastStatsError = e }
-        var names: [String] = []
-        if let list = s["transferring"] as? [Any] {
-            for entry in list {
-                if let d = entry as? [String: Any], let name = d["name"] as? String { names.append(name) }
-            }
-        }
-        p.currentFiles = names
+        if let v = RcloneLogParser.int(s["listed"]) { p.listed = v }
+        p.currentFiles = RcloneLogParser.names(s["transferring"])
+        p.currentChecks = RcloneLogParser.names(s["checking"])
         // Throttling ends once bytes move again with no new throttle complaints.
         if p.isThrottled && throttleLinesSinceStats == 0 && p.bytesDone > bytesAtThrottle {
             p.isThrottled = false
         }
         throttleLinesSinceStats = 0
         progress = p
+    }
+
+    /// Paths from a stats list: `transferring` holds objects with a `name`, `checking` holds plain strings.
+    /// Absent (rclone leaves the key out when nothing is in flight) -> [].
+    static func names(_ any: Any?) -> [String] {
+        guard let list = any as? [Any] else { return [] }
+        var names: [String] = []
+        for entry in list {
+            if let name = entry as? String {
+                if !name.isEmpty { names.append(name) }
+            } else if let d = entry as? [String: Any], let name = d["name"] as? String {
+                names.append(name)
+            }
+        }
+        return names
     }
 
     // MARK: - Pattern helpers (also used by ErrorClassifier)

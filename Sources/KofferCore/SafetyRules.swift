@@ -221,6 +221,11 @@ public enum SafetyRules {
         if lowered.contains("--delete-excluded") || lowered.contains(where: { $0.hasPrefix("--delete-excluded=") }) {
             return .refused("Refusing to run rclone with --delete-excluded.")
         }
+        // v0.4: OneDrive's delta listing only for Koffer's own read-only listings.
+        let deltaFlag: String = RcloneCommand.oneDriveDeltaFlag
+        if verb != "lsjson" && lowered.contains(where: { $0 == deltaFlag || $0.hasPrefix(deltaFlag + "=") }) {
+            return .refused("Koffer only uses --onedrive-delta to list files.")
+        }
         switch verb {
         case "sync":
             guard let idx = arguments.firstIndex(of: "--backup-dir"), idx + 1 < arguments.count else {
@@ -231,6 +236,7 @@ public enum SafetyRules {
                   backup.isSameOrInside(root) else {
                 return .refused("The removed-items folder in the command does not match the job.")
             }
+            if let problem = renameStrategyProblem(arguments) { return .refused(problem) }
             return .ok
         case "about", "size", "version", "lsjson", "listremotes":
             // Read-only.
@@ -260,6 +266,40 @@ public enum SafetyRules {
         default:
             return .refused("Koffer does not run 'rclone \(verb)'.")
         }
+    }
+
+    /// `--track-renames-strategy` (v0.4) is fine with `--track-renames` and only rclone's own strategies
+    /// (hash, modtime, leaf, comma-separated). Nil when the arguments are fine.
+    static func renameStrategyProblem(_ arguments: [String]) -> String? {
+        let flag: String = "--track-renames-strategy"
+        var values: [String] = []
+        var i: Int = 0
+        while i < arguments.count {
+            let a: String = arguments[i]
+            if a == flag {
+                guard i + 1 < arguments.count else { return "--track-renames-strategy needs a value." }
+                values.append(arguments[i + 1])
+                i += 2
+                continue
+            }
+            if a.hasPrefix(flag + "=") {
+                values.append(String(a.dropFirst(flag.count + 1)))
+            }
+            i += 1
+        }
+        if values.isEmpty { return nil }
+        if !arguments.contains("--track-renames") {
+            return "--track-renames-strategy only makes sense with --track-renames."
+        }
+        let allowed: Set<String> = ["hash", "modtime", "leaf"]
+        for value in values {
+            let parts: [String] = value.split(separator: ",", omittingEmptySubsequences: false).map { String($0) }
+            if parts.isEmpty { return "Unknown rename strategy \"\(value)\"." }
+            for part in parts where !allowed.contains(part) {
+                return "Unknown rename strategy \"\(value)\"."
+            }
+        }
+        return nil
     }
 
     /// `rclone config ...`: only signing in again and reading the redacted settings of one remote.

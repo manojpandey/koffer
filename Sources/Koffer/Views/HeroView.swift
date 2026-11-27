@@ -9,10 +9,11 @@ struct HeroView: View {
 
     var body: some View {
         let phase: JobPhase = model.phase(for: job)
+        let looking: LookingProgress? = model.lookingProgress(for: job)
         HStack(alignment: .center, spacing: Theme.Space.l) {
-            HeroRing(phase: phase, fraction: model.engine.progress.fraction)
+            HeroRing(phase: phase, fraction: ringFraction(phase: phase, looking: looking))
                 .background(HeroGlow(intensity: glowIntensity(phase), isActive: phase == .syncing))
-            HeroDetails(job: job, phase: phase)
+            HeroDetails(job: job, phase: phase, looking: looking)
             Spacer(minLength: 0)
         }
         .padding(Theme.Space.l)
@@ -22,6 +23,14 @@ struct HeroView: View {
                 .fill(Theme.tileFill)
         )
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.hero, style: .continuous))
+    }
+
+    /// Bytes while backing up; compared files while looking (nil = the ring circles).
+    private func ringFraction(phase: JobPhase, looking: LookingProgress?) -> Double? {
+        if case .working = phase {
+            return looking?.fraction
+        }
+        return model.engine.progress.fraction
     }
 
     private func glowIntensity(_ phase: JobPhase) -> Double {
@@ -69,12 +78,61 @@ struct HeroDetails: View {
     @EnvironmentObject var model: AppModel
     let job: SyncJob
     let phase: JobPhase
+    let looking: LookingProgress?
 
     var body: some View {
         if phase == .syncing {
             SyncingDetails(progress: model.engine.progress)
+        } else if let info = looking {
+            LookingDetails(info: info)
         } else {
             RestingDetails(job: job, phase: phase, last: model.lastRecord(for: job))
+        }
+    }
+}
+
+/// While Koffer lists and compares files: what it is doing, the file it is on, and how long it has taken.
+struct LookingDetails: View {
+    let info: LookingProgress
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            Text(info.headline)
+                .font(.system(size: 15, weight: .semibold))
+                .monospacedDigit()
+                .fixedSize(horizontal: false, vertical: true)
+            if let file = info.currentFile {
+                Text(file)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            if let since = info.since {
+                ElapsedText(since: since)
+            }
+            if info.isFirstCheck {
+                Text("The first check compares file contents and can take a while for a large folder.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 2)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// "4m 05s so far", ticking once a second.
+struct ElapsedText: View {
+    let since: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: since, by: 1.0)) { context in
+            Text("\(Format.duration(max(0, context.date.timeIntervalSince(since)))) so far")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
         }
     }
 }

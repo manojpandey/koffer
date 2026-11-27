@@ -41,6 +41,13 @@ struct CloudManifest: Codable, Equatable {
     /// When the backup that produced this listing started. A local file changed after this is not a candidate.
     var date: Date
     var files: [Entry]
+
+    /// Bytes of all files with a known size.
+    var totalBytes: Int64 {
+        var total: Int64 = 0
+        for entry in files where entry.size > 0 { total += entry.size }
+        return total
+    }
 }
 
 /// Size and modification date of a regular file on this disk.

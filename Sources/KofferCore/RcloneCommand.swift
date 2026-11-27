@@ -1,5 +1,21 @@
 import Foundation
 
+/// How `rclone sync --track-renames` pairs a file that disappeared in one place with one that appeared elsewhere.
+public enum RenameStrategy: String, Equatable {
+    /// rclone's default: same size and same content hash. Hashing a local file reads all of it, so on a big
+    /// folder whose cloud copy has other modification times the first check reads a lot of data.
+    case hash
+    /// Same size, same modification time and same file name. Reads no file contents. Only safe once a clean
+    /// backup has set the cloud's modification times to the disk's (otherwise renames would be uploaded again).
+    case modtimeLeaf
+
+    /// The one place the choice is made: `.modtimeLeaf` once the job has a valid cloud record (a clean backup
+    /// with this version finished, so rclone has set the cloud modification times), else `.hash`.
+    public static func forJob(hasCleanRecord: Bool) -> RenameStrategy {
+        return hasCleanRecord ? .modtimeLeaf : .hash
+    }
+}
+
 /// Builds rclone argument arrays. Arguments go straight to Process (no shell), so spaces are fine.
 public enum RcloneCommand {
     public static let excludes: [String] = [".DS_Store", "._*", ".Spotlight-V100/**", ".Trashes/**"]
@@ -30,10 +46,15 @@ public enum RcloneCommand {
     }
 
     /// The sync command, exactly as agreed. Never contains --delete-before.
-    public static func sync(job: SyncJob, dryRun: Bool, date: Date = Date(), timeZone: TimeZone = .current) -> [String] {
-        var args: [String] = ["sync", job.source, job.destination,
-                              "--track-renames",
-                              "--backup-dir", backupDir(removedRoot: job.removedRoot, date: date, timeZone: timeZone)]
+    /// `.modtimeLeaf` adds `--track-renames-strategy modtime,leaf` right after `--track-renames`; `.hash` keeps
+    /// rclone's default (no extra flag). Pick it with `RenameStrategy.forJob(hasCleanRecord:)`.
+    public static func sync(job: SyncJob, dryRun: Bool, date: Date = Date(), timeZone: TimeZone = .current,
+                            renameStrategy: RenameStrategy = .hash) -> [String] {
+        var args: [String] = ["sync", job.source, job.destination, "--track-renames"]
+        if renameStrategy == .modtimeLeaf {
+            args.append(contentsOf: ["--track-renames-strategy", "modtime,leaf"])
+        }
+        args.append(contentsOf: ["--backup-dir", backupDir(removedRoot: job.removedRoot, date: date, timeZone: timeZone)])
         for pattern in excludes {
             args.append("--exclude")
             args.append(pattern)
@@ -72,13 +93,31 @@ public enum RcloneCommand {
     /// `rclone lsjson <target> -R --files-only --no-mimetype --no-modtime` plus the sync's excludes:
     /// every file in the backup with its path and size (v0.3 "deleted in the cloud"). Read-only.
     /// Exit 3 with "directory not found" when the folder itself is gone.
-    public static func listFiles(target: String) -> [String] {
+    /// `oneDriveDelta` adds `--onedrive-delta` (one delta listing instead of one request per folder; see
+    /// `wantsOneDriveDelta`). Only ever on this read-only listing, never on a sync.
+    public static func listFiles(target: String, oneDriveDelta: Bool = false) -> [String] {
         var args: [String] = ["lsjson", target, "-R", "--files-only", "--no-mimetype", "--no-modtime"]
         for pattern in excludes {
             args.append("--exclude")
             args.append(pattern)
         }
+        if oneDriveDelta { args.append(oneDriveDeltaFlag) }
         return args
+    }
+
+    public static let oneDriveDeltaFlag: String = "--onedrive-delta"
+
+    /// True for a OneDrive remote, unless the backup is known to be a small part of the drive.
+    /// OneDrive's delta listing always walks the whole drive and drops what is outside the folder asked for
+    /// (`rclone help backend onedrive`), so it only pays off when most of the drive is this backup.
+    /// Unknown sizes count as "worth it": a big archive is usually most of the drive.
+    public static func wantsOneDriveDelta(remoteType: String?, backupBytes: Int64?, driveUsedBytes: Int64?) -> Bool {
+        guard let type = remoteType, type.trimmingCharacters(in: .whitespaces).lowercased() == "onedrive" else { return false }
+        if let backup = backupBytes, let used = driveUsedBytes, used > 0, backup >= 0 {
+            // Less than half of what the drive holds: walking the whole drive costs more than it saves.
+            if backup < used / 2 { return false }
+        }
+        return true
     }
 
     /// `rclone mkdir <target>`

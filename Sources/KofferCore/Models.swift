@@ -119,8 +119,20 @@ public struct SyncProgress: Equatable {
     public var errors: Int = 0
     /// True while OneDrive is rate-limiting us (HTTP 429) and rclone is backing off.
     public var isThrottled: Bool = false
+    /// v0.4: entries rclone has listed so far, on both sides together (files and folders); stats `listed`.
+    public var listed: Int = 0
+    /// v0.4: paths (relative to the job root) being compared right now; stats `checking`.
+    /// While rclone matches renames these are destination paths.
+    public var currentChecks: [String] = []
 
     public init() {}
+
+    /// 0...1 by checks (compared files); nil until rclone has counted some. The total can still grow while
+    /// rclone lists, so this is a rough guide, not a promise.
+    public var checksFraction: Double? {
+        guard checksTotal > 0, checksDone > 0 else { return nil }
+        return min(1, max(0, Double(checksDone) / Double(checksTotal)))
+    }
 
     /// 0...1 by bytes; nil while totals are unknown.
     public var fraction: Double? {

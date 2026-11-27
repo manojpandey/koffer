@@ -31,6 +31,20 @@ struct CloudDeletionNote: Equatable {
     var isError: Bool
 }
 
+/// What the hero shows while Koffer looks at what changed ("What will change?", or before a backup).
+struct LookingProgress: Equatable {
+    /// "Listing files… 12,400 found", "Comparing files… 8,400 of 22,000", ...
+    var headline: String
+    /// The file being compared right now (relative path), if rclone said.
+    var currentFile: String?
+    /// Checks-based fraction for the ring; nil = indeterminate.
+    var fraction: Double?
+    /// When the work started, for the elapsed time.
+    var since: Date?
+    /// The job has no clean backup with this version yet: the first check reads file contents.
+    var isFirstCheck: Bool
+}
+
 /// New / moved / removed / errors for the current run (live) or the last finished one.
 struct RunNumbers: Equatable {
     var uploaded: Int
@@ -472,6 +486,46 @@ final class AppModel: ObservableObject {
         guard let r = lastRecord(for: job) else { return nil }
         return RunNumbers(uploaded: r.uploaded, moved: r.moved, removed: r.removed,
                           errors: r.errors, isThrottled: false, isLive: false)
+    }
+
+    /// Non-nil while this job's run is listing and comparing files (a preview, or a backup's own dry run),
+    /// or checking the cloud copy first.
+    func lookingProgress(for job: SyncJob) -> LookingProgress? {
+        guard engine.activeJobID == job.id else { return nil }
+        let p: SyncProgress = engine.progress
+        let since: Date? = engine.busySince
+        let firstCheck: Bool = engine.isFirstCheck
+        switch engine.status {
+        case .previewing:
+            return AppModel.looking(p, since: since, isFirstCheck: firstCheck)
+        case .preparing(let step):
+            if step == SyncEngine.lookingMessage {
+                return AppModel.looking(p, since: since, isFirstCheck: firstCheck)
+            }
+            if step == SyncEngine.checkingCloudMessage {
+                return LookingProgress(headline: "Checking \(cloudName(for: job))…", currentFile: nil, fraction: nil,
+                                       since: since, isFirstCheck: false)
+            }
+            return nil
+        case .idle, .syncing, .paused, .done, .needsAttention:
+            return nil
+        }
+    }
+
+    /// Plain lines from rclone's dry-run stats. `listed` counts both sides (and folders), so it runs ahead of
+    /// the number of files; it only shows that work is going on.
+    static func looking(_ p: SyncProgress, since: Date?, isFirstCheck: Bool) -> LookingProgress {
+        let headline: String
+        if p.checksTotal == 0 || (p.checksDone == 0 && p.currentChecks.isEmpty) {
+            headline = p.listed > 0 ? "Listing files… \(Format.count(p.listed)) found" : "Listing files…"
+        } else if p.checksDone < p.checksTotal || !p.currentChecks.isEmpty {
+            headline = "Comparing files… \(Format.count(p.checksDone)) of \(Format.count(p.checksTotal))"
+        } else {
+            // All pairs compared; rclone is matching files that moved (or finishing up).
+            headline = "Matching moved files…"
+        }
+        return LookingProgress(headline: headline, currentFile: p.currentChecks.first, fraction: p.checksFraction,
+                               since: since, isFirstCheck: isFirstCheck)
     }
 
     func currentFiles(for job: SyncJob) -> [String] {
