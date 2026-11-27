@@ -86,3 +86,5 @@ CI runs on GitHub Actions (`macos-15`): build, test, bundle, and upload the zipp
 ```
 
 This removes the app and leaves your settings, history and logs where they are.
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
